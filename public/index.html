@@ -4,12 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Betorspin Katalog</title>
-  <link rel="icon" type="image/png" sizes="64x64" href="favicon.png?v=2">
-  <link rel="icon" type="image/png" sizes="192x192" href="favicon-192.png?v=2">
-  <link rel="apple-touch-icon" href="favicon-192.png?v=2">
+  <link rel="icon" type="image/png" sizes="64x64" href="favicon.png?v=3">
+  <link rel="icon" type="image/png" sizes="192x192" href="favicon-192.png?v=3">
+  <link rel="apple-touch-icon" href="favicon-192.png?v=3">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
   <div id="app">
@@ -33,10 +33,10 @@
         <div id="onlinePopover" class="online-popover"></div>
       </div>
 
-      <!-- Kullanıcı Profili & Yetki Rozeti -->
+      <!-- Kullanıcı Profili / Giriş Butonu -->
       <button id="btnUser" class="user-btn" title="Profil & Hesap Ayarları">
-        <span id="userAvatar" class="av">👤</span>
-        <span id="userName">—</span>
+        <span id="userAvatar" class="av">🔑</span>
+        <span id="userName">Giriş Yap</span>
         <span id="userRoleBadge" class="role-badge"></span>
       </button>
     </header>
@@ -66,7 +66,7 @@
           <button id="btnUpload" class="primary edit-only">⬆ Görsel yükle</button>
           <button id="btnUploadFolder" class="edit-only">📂 Klasör yükle</button>
           <button id="btnNewCat" class="edit-only">＋ Yeni kategori</button>
-          <span id="readonlyNotice" class="ro-notice" hidden>👁️ İzleyici modu · Düzenleme için yetki gerekir</span>
+          <span id="readonlyNotice" class="ro-notice" hidden>👁️ İzleyici modu · Düzenleme için sağ üstten yetkili hesabınızla giriş yapın</span>
           <div class="spacer"></div>
           <select id="sizeFilter" title="Ölçüye göre filtrele"></select>
           <select id="sortBy" title="Sırala">
@@ -111,15 +111,15 @@
         <div class="admin-head">
           <div>
             <h2>🛡️ Admin &amp; Güvenlik Paneli</h2>
-            <p class="muted" style="margin:2px 0 0">Yetkileri, IP izinlerini, tüm düzenleme geçmişini ve erişim engellerini buradan yönetin.</p>
+            <p class="muted" style="margin:2px 0 0">Ekip profillerini oluşturun, kullanıcı adı/şifre dağıtın, tüm düzenleme geçmişini ve güvenlik duvarı kayıtlarını yönetin.</p>
           </div>
           <button id="btnAdminRefresh">🔄 Yenile</button>
         </div>
         <div id="adminStats" class="admin-stats"></div>
         <div class="admin-subtabs" id="adminSubtabs">
-          <button data-atab="users" class="active">👥 Profiller &amp; Çevrimiçi Kişiler</button>
-          <button data-atab="ips">🌐 IP Yetkilendirme</button>
+          <button data-atab="users" class="active">👥 Profiller &amp; Hesap Oluşturma</button>
           <button data-atab="logs">📜 İşlem Geçmişi (Kim Ne Yaptı)</button>
+          <button data-atab="security">🛡️ Güvenlik &amp; Saldırı Kayıtları</button>
           <button data-atab="bans">🚫 Engellenenler</button>
         </div>
         <div id="adminBody"></div>
@@ -134,6 +134,6 @@
   <input id="avatarInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
   <div id="modalRoot"></div>
   <div id="toasts"></div>
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

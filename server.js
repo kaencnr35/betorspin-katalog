@@ -1,12 +1,11 @@
 'use strict';
 /**
- * Betorspin Katalog – Sunucu
- * - Rol & Yetki Sistemi: owner (Kurucu / En Üst Yetki), admin, editor, viewer (İzleyici)
- * - Profil & Avatar yükleme, şifreli (scrypt) hesaplar, HttpOnly oturum çerezleri
- * - IP tabanlı ve profil tabanlı yetkilendirme
- * - Canlı çevrimiçi kişiler (Anonim - X ve profiller)
- * - Admin Paneli: tüm işlem kayıtları (audit log), kullanıcı/IP yetkilendirme, engelleme (ban/kick)
- * - Görsel sıkıştırma, boyutlandırma (sharp) ve ZIP indirme
+ * Betorspin Katalog – Sunucu (Profil & Hesap Tabanlı Güvenlik Mimarisi)
+ * - IP tabanlı yetkilendirme kaldırıldı (aynı ağ/IP'den çalışan ekipler için tam izolasyon)
+ * - Dışarıdan kayıt kapalıdır; yalnızca Admin ve Kurucu yeni profil (kullanıcı adı + şifre) oluşturabilir
+ * - Kalıcı, HMAC-SHA256 imzalı + tokenVersion korumalı HttpOnly oturumlar (sunucu yeniden başlasa bile oturum düşmez)
+ * - Giriş yapan kullanıcı kendi adını, kullanıcı adını, şifresini (mevcut şifre doğrulamasıyla) ve profil fotoğrafını değiştirebilir
+ * - Saldırı & Güvenlik Sistemi (WAF, CSRF/Origin kontrolü, CSP, hesap bazlı brute-force koruması, cihaz bazlı engelleme, güvenlik günlükleri)
  */
 const express = require('express');
 const multer = require('multer');
@@ -22,8 +21,9 @@ const cloud = require('./cloud-sync');
 
 const PORT = process.env.PORT || 3000;
 const OWNER_INITIAL_PW = process.env.OWNER_PASSWORD || 'Betorspin2026!';
-const OWNER_DEFAULT_IPS = (process.env.OWNER_IPS || '178.220.247.115,127.0.0.1,::1,10.192.8.201')
-  .split(',').map((s) => s.trim()).filter(Boolean);
+const AUTH_SECRET = crypto.createHash('sha256')
+  .update(process.env.STORAGE_SECRET || process.env.GITHUB_SYNC_TOKEN || 'betorspin-auth-secret-2026')
+  .digest();
 
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, 'data');
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
@@ -42,11 +42,14 @@ let db = {
   rev: 1,
   categories: [],
   images: [],
-  users: [],      // { id, username, name, pwHash, role: 'owner'|'admin'|'editor'|'viewer', avatar, lastIp, lastSeen, createdAt }
-  sessions: {},   // sid -> { userId, ip, lastSeen, anonNum, createdAt, explicitLogout }
-  ipRules: [],    // { id, ip, label, role: 'owner'|'admin'|'editor', createdBy, createdAt }
-  bans: [],       // { id, type: 'user'|'ip', target, targetName, reason, createdBy, createdAt }
-  logs: [],       // { id, ts, actorId, actorName, actorAvatar, actorRole, ip, action, detail }
+  // users: { id, username, name, pwHash, role:'owner'|'admin'|'editor'|'viewer', avatar, tokenVersion, banned, banReason, lastSeen, createdAt, createdBy }
+  users: [],
+  // sessions: sid -> { userId, devId, lastSeen, createdAt }
+  sessions: {},
+  // bans: { id, type:'user'|'device', target, targetName, reason, createdBy, createdAt }
+  bans: [],
+  // logs: { id, ts, actorId, actorName, actorAvatar, actorRole, action, detail, severity:'info'|'warn'|'security' }
+  logs: [],
 };
 
 function loadDbFromDisk() {
@@ -54,11 +57,12 @@ function loadDbFromDisk() {
     try {
       const raw = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
       db = { ...db, ...raw };
-      db.users = db.users || [];
+      db.users = (db.users || []).map((u) => ({ tokenVersion: 1, banned: false, banReason: '', ...u }));
       db.sessions = db.sessions || {};
-      db.ipRules = db.ipRules || [];
-      db.bans = db.bans || [];
+      // Eski IP banlarını temizle (aynı IP'den çalışıldığı için IP engeli kullanılmaz)
+      db.bans = (db.bans || []).filter((b) => b.type !== 'ip');
       db.logs = db.logs || [];
+      delete db.ipRules;
     } catch (e) {
       console.error('db.json okunamadı:', e);
     }
@@ -74,7 +78,7 @@ function save(bumpRev = true) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Yardımcılar & Güvenlik                                              */
+/* Yardımcılar & Kriptografik Oturum                                   */
 /* ------------------------------------------------------------------ */
 const uid = () => crypto.randomBytes(6).toString('hex');
 const genSid = () => crypto.randomBytes(32).toString('hex');
@@ -84,7 +88,6 @@ const sanitizeUsername = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9_
 
 const ROLE_RANK = { viewer: 0, editor: 1, admin: 2, owner: 3 };
 const ROLE_LABEL = { owner: 'Kurucu', admin: 'Admin', editor: 'Editör', viewer: 'İzleyici' };
-const maxRole = (a, b) => ((ROLE_RANK[a] || 0) >= (ROLE_RANK[b] || 0) ? a : b);
 
 const EXT = { png: 'png', jpeg: 'jpg', webp: 'webp', gif: 'gif' };
 const MIME = { png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
@@ -101,22 +104,26 @@ const thumbPath = (id) => path.join(THUMB_DIR, id + '.webp');
 const avatarPath = (id) => path.join(AVATAR_DIR, id + '.webp');
 const safeUnlink = (p) => fsp.unlink(p).catch(() => {});
 
-function normalizeIp(raw) {
-  let ip = String(raw || '').trim();
-  if (ip.startsWith('::ffff:')) ip = ip.slice(7);
-  if (ip === '::1') ip = '127.0.0.1';
-  return ip;
+/** Kalıcı giriş için HMAC-SHA256 imzalı çerez jetonu */
+function signAuthToken(user) {
+  const payload = `${user.id}.${user.tokenVersion || 1}`;
+  const sig = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
 }
 
-function getClientIp(req) {
-  const cf = req.headers['cf-connecting-ip'] || req.headers['true-client-ip'];
-  if (cf) return normalizeIp(String(cf).split(',')[0]);
-  const xff = req.headers['x-forwarded-for'];
-  if (xff) {
-    const parts = String(xff).split(',').map((s) => s.trim()).filter(Boolean);
-    if (parts.length) return normalizeIp(parts[0]);
-  }
-  return normalizeIp(req.socket?.remoteAddress || req.ip || '');
+function verifyAuthToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [userId, verStr, sig] = parts;
+  const payload = `${userId}.${verStr}`;
+  const expected = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  const user = db.users.find((u) => u.id === userId);
+  if (!user || (user.tokenVersion || 1) !== Number(verStr)) return null;
+  return user;
 }
 
 function parseCookies(req) {
@@ -133,22 +140,21 @@ function parseCookies(req) {
   return out;
 }
 
-function setSessionCookie(req, res, sid) {
+function setCookies(req, res, cookieMap) {
   const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
-  const parts = [
-    `bk_sid=${sid}`,
-    'Path=/',
-    'HttpOnly',
-    'SameSite=Lax',
-    `Max-Age=${365 * 24 * 3600}`,
-  ];
-  if (isSecure) parts.push('Secure');
-  res.setHeader('Set-Cookie', parts.join('; '));
+  const prev = res.getHeader('Set-Cookie');
+  const list = Array.isArray(prev) ? prev : prev ? [String(prev)] : [];
+  for (const [name, val] of Object.entries(cookieMap)) {
+    const maxAge = val === '' ? 0 : 365 * 24 * 3600;
+    const parts = [`${name}=${encodeURIComponent(val)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', `Max-Age=${maxAge}`];
+    if (isSecure) parts.push('Secure');
+    list.push(parts.join('; '));
+  }
+  res.setHeader('Set-Cookie', list);
 }
 
 async function ensureOwnerBootstrap() {
   let owner = db.users.find((u) => u.role === 'owner');
-  let changed = false;
   if (!owner) {
     owner = {
       id: 'owner-kaan',
@@ -157,29 +163,16 @@ async function ensureOwnerBootstrap() {
       pwHash: await passwords.hash(OWNER_INITIAL_PW),
       role: 'owner',
       avatar: '',
-      lastIp: '178.220.247.115',
+      tokenVersion: 1,
+      banned: false,
+      banReason: '',
       lastSeen: Date.now(),
       createdAt: Date.now(),
+      createdBy: 'Sistem',
     };
     db.users.unshift(owner);
-    changed = true;
+    save(false);
   }
-  for (const rawIp of OWNER_DEFAULT_IPS) {
-    const ip = normalizeIp(rawIp);
-    if (!ip) continue;
-    if (!db.ipRules.some((r) => r.ip === ip)) {
-      db.ipRules.push({
-        id: uid(),
-        ip,
-        label: ip === '127.0.0.1' ? 'Yerel Bilgisayar (Kurucu)' : 'Kaan (Kurucu IP)',
-        role: 'owner',
-        createdBy: 'Sistem',
-        createdAt: Date.now(),
-      });
-      changed = true;
-    }
-  }
-  if (changed) save(false);
 }
 
 /* ------------------------------------------------------------------ */
@@ -187,8 +180,8 @@ async function ensureOwnerBootstrap() {
 /* ------------------------------------------------------------------ */
 const ONLINE_TTL_MS = 25 * 1000;
 
-function addLog(req, action, detail) {
-  const actor = req.auth || {};
+function addLog(req, action, detail, severity = 'info') {
+  const actor = req?.auth || {};
   const entry = {
     id: uid(),
     ts: Date.now(),
@@ -196,85 +189,45 @@ function addLog(req, action, detail) {
     actorName: actor.name || 'Anonim',
     actorAvatar: actor.avatar || '',
     actorRole: actor.role || 'viewer',
-    ip: actor.ip || getClientIp(req),
     action,
     detail: String(detail || '').slice(0, 500),
+    severity,
   };
   db.logs.unshift(entry);
-  if (db.logs.length > 1000) db.logs.length = 1000;
+  if (db.logs.length > 1200) db.logs.length = 1200;
 }
 
-function checkBan(userId, ip) {
-  // Kurucu (owner) veya kurucu IP'si asla engellenemez
-  if (userId) {
-    const u = db.users.find((x) => x.id === userId);
-    if (u && u.role === 'owner') return null;
-  }
-  const ipRule = db.ipRules.find((r) => r.ip === ip);
-  if (ipRule && ipRule.role === 'owner') return null;
-
-  if (userId) {
-    const b = db.bans.find((x) => x.type === 'user' && x.target === userId);
+function checkBan(user, devId) {
+  if (user && user.role === 'owner') return null;
+  if (user) {
+    if (user.banned) return { reason: user.banReason || 'Hesabınız yönetici tarafından askıya alındı.' };
+    const b = db.bans.find((x) => x.type === 'user' && x.target === user.id);
     if (b) return b;
   }
-  if (ip) {
-    const b = db.bans.find((x) => x.type === 'ip' && x.target === ip);
+  if (devId) {
+    const b = db.bans.find((x) => x.type === 'device' && x.target === devId);
     if (b) return b;
   }
   return null;
 }
 
-function resolveAuth(req, res) {
-  const ip = getClientIp(req);
-  const cookies = parseCookies(req);
-  let sid = cookies.bk_sid;
-  if (!sid || typeof sid !== 'string' || sid.length < 32 || sid.length > 128) {
-    sid = genSid();
-    setSessionCookie(req, res, sid);
-  }
-  let sess = db.sessions[sid];
-  const now = Date.now();
-  if (!sess) {
-    sess = { userId: null, ip, lastSeen: now, createdAt: now, explicitLogout: false };
-    db.sessions[sid] = sess;
-  }
-  sess.ip = ip;
-  sess.lastSeen = now;
-
-  const ipRule = db.ipRules.find((r) => r.ip === ip);
-  const ownerUser = db.users.find((u) => u.role === 'owner');
-
-  // Kurucu IP'sinden girildiğinde (ve özel olarak çıkış yapılmadıysa) otomatik Kurucu hesabına bağla
-  if (!sess.userId && !sess.explicitLogout && ipRule && ipRule.role === 'owner' && ownerUser) {
-    sess.userId = ownerUser.id;
-  }
-
+function buildAuthObject(sid, devId, sess) {
   let user = sess.userId ? db.users.find((u) => u.id === sess.userId) : null;
   if (sess.userId && !user) sess.userId = null;
-
-  if (user) {
-    user.lastIp = ip;
-    user.lastSeen = now;
-  }
-
-  const ban = checkBan(user?.id, ip);
-  const profileRole = user ? user.role : 'viewer';
-  const ipRole = ipRule ? ipRule.role : 'viewer';
-  const effectiveRole = maxRole(profileRole, ipRole);
-  const rank = ROLE_RANK[effectiveRole] || 0;
-
+  if (user) user.lastSeen = Date.now();
+  const ban = checkBan(user, devId);
+  const role = user && !ban ? user.role : 'viewer';
+  const rank = ROLE_RANK[role] || 0;
   return {
     sid,
+    devId,
     sess,
-    ip,
     user,
     ban,
     name: user ? user.name : '',
     username: user ? user.username : '',
     avatar: user ? user.avatar : '',
-    profileRole,
-    ipRole,
-    role: effectiveRole,
+    role,
     canEdit: !ban && rank >= ROLE_RANK.editor,
     canAdmin: !ban && rank >= ROLE_RANK.admin,
     isOwner: !ban && rank >= ROLE_RANK.owner,
@@ -282,31 +235,81 @@ function resolveAuth(req, res) {
   };
 }
 
-/** Çevrimiçi kişileri hesaplar (genel görünüm: IP sızdırmaz!) */
+function refreshAuth(req) {
+  req.auth = buildAuthObject(req.auth.sid, req.auth.devId, req.auth.sess);
+  return req.auth;
+}
+
+function resolveAuth(req, res) {
+  const cookies = parseCookies(req);
+  let sid = cookies.bk_sid;
+  let devId = cookies.bk_dev;
+  const toSet = {};
+  if (!sid || typeof sid !== 'string' || sid.length < 32 || sid.length > 128) {
+    sid = genSid();
+    toSet.bk_sid = sid;
+  }
+  if (!devId || typeof devId !== 'string' || devId.length < 16 || devId.length > 64) {
+    devId = crypto.randomBytes(16).toString('hex');
+    toSet.bk_dev = devId;
+  }
+  if (Object.keys(toSet).length) setCookies(req, res, toSet);
+
+  let sess = db.sessions[sid];
+  const now = Date.now();
+  if (!sess) {
+    sess = { userId: null, devId, lastSeen: now, createdAt: now };
+    db.sessions[sid] = sess;
+  }
+  sess.devId = devId;
+  sess.lastSeen = now;
+
+  let user = sess.userId ? db.users.find((u) => u.id === sess.userId) : null;
+  if (!user && cookies.bk_auth) {
+    const verified = verifyAuthToken(cookies.bk_auth);
+    if (verified) {
+      user = verified;
+      sess.userId = user.id;
+    }
+  }
+  if (user && cookies.bk_auth) {
+    const verified = verifyAuthToken(cookies.bk_auth);
+    if (!verified) {
+      user = null;
+      sess.userId = null;
+      setCookies(req, res, { bk_auth: '' });
+    }
+  }
+  return buildAuthObject(sid, devId, sess);
+}
+
+/** Çevrimiçi kişileri hesaplar (hassas veri içermez) */
 function getPublicPresence(mySid) {
   const now = Date.now();
   const activeSids = Object.entries(db.sessions)
-    .filter(([, s]) => now - (s.lastSeen || 0) <= ONLINE_TTL_MS && !checkBan(s.userId, s.ip))
+    .filter(([, s]) => {
+      if (now - (s.lastSeen || 0) > ONLINE_TTL_MS) return false;
+      const u = s.userId ? db.users.find((x) => x.id === s.userId) : null;
+      return !checkBan(u, s.devId);
+    })
     .sort((a, b) => (a[1].createdAt || 0) - (b[1].createdAt || 0));
 
-  const seenUsers = new Map(); // userId -> { id, name, avatar, role, isMe }
+  const seenUsers = new Map();
   const anonList = [];
   let myAnonLabel = '';
 
   for (const [sid, s] of activeSids) {
     const u = s.userId ? db.users.find((x) => x.id === s.userId) : null;
-    const ipRule = db.ipRules.find((r) => r.ip === s.ip);
     const isMe = sid === mySid;
     if (u) {
-      const role = maxRole(u.role, ipRule ? ipRule.role : 'viewer');
       const existing = seenUsers.get(u.id);
       if (!existing || isMe) {
         seenUsers.set(u.id, {
           id: u.id,
           name: u.name,
           avatar: u.avatar || '',
-          role,
-          roleLabel: ROLE_LABEL[role] || 'İzleyici',
+          role: u.role,
+          roleLabel: ROLE_LABEL[u.role] || 'İzleyici',
           isMe: isMe || Boolean(existing?.isMe),
         });
       }
@@ -503,26 +506,32 @@ async function deleteImageFiles(img) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Express & Güvenlik Katmanları                                       */
+/* Express & Çok Katmanlı Güvenlik Sistemi (WAF + CSRF + CSP)          */
 /* ------------------------------------------------------------------ */
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
 
-// Güvenlik başlıkları
+// 1. Sıkı Güvenlik Başlıkları (CSP, Clickjacking, MIME Sniffing, İzolasyon)
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-  res.setHeader('Referrer-Policy', 'same-origin');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+  );
   next();
 });
 
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '2mb' }));
 const upload = multer({ dest: TMP_DIR, limits: { fileSize: 300 * 1024 * 1024, files: 300 } });
 const avatarUpload = multer({ dest: TMP_DIR, limits: { fileSize: 15 * 1024 * 1024, files: 1 } });
 
-// Oturum ve engelleme kontrolü
+// 2. Oturum ve Engelleme Kontrolü
 app.use((req, res, next) => {
   req.auth = resolveAuth(req, res);
   if (req.auth.ban && (req.path.startsWith('/api') || req.path.startsWith('/files') || req.path.startsWith('/thumbs'))) {
@@ -535,33 +544,83 @@ app.use((req, res, next) => {
   next();
 });
 
+// 3. WAF (Saldırı Tarayıcıları, Path Traversal, XSS/Injection Tespiti) & CSRF Koruması
+const SCANNER_UA = /(sqlmap|nikto|nuclei|dirbuster|gobuster|wpscan|acunetix|nessus|masscan|zgrab)/i;
+const ATTACK_PATH = /(\.\.[/\\]|%2e%2e|<script|javascript:|onerror\s*=|onload\s*=|union\s+select|\/etc\/passwd|\.env\b|\.git\b|__proto__|constructor\.prototype)/i;
+
+app.use((req, res, next) => {
+  const ua = String(req.headers['user-agent'] || '');
+  const rawUrl = req.originalUrl || req.url || '';
+  let decodedUrl = rawUrl;
+  try { decodedUrl = decodeURIComponent(rawUrl); } catch { /* bozuk url */ }
+  const bodyStr = req.body && typeof req.body === 'object' ? JSON.stringify(req.body) : '';
+  if (SCANNER_UA.test(ua) || ATTACK_PATH.test(rawUrl) || ATTACK_PATH.test(decodedUrl) || ATTACK_PATH.test(bodyStr)) {
+    addLog(req, 'Saldırı Engellendi (WAF)', `Şüpheli istek engellendi: ${req.method} ${decodedUrl.slice(0, 120)}`, 'security');
+    save(false);
+    return res.status(403).json({ error: 'Güvenlik duvarı tarafından engellendi.' });
+  }
+  // Durum değiştiren API isteklerinde CSRF & Origin doğrulaması
+  if (req.path.startsWith('/api') && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    const xrw = req.headers['x-requested-with'];
+    if (xrw !== 'BetorspinKatalog') {
+      addLog(req, 'CSRF Engellendi', `Geçersiz başlık ile dış istek reddedildi: ${req.method} ${req.path}`, 'security');
+      save(false);
+      return res.status(403).json({ error: 'Güvenlik doğrulaması başarısız (CSRF).' });
+    }
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (origin && host) {
+      try {
+        if (new URL(origin).host !== host) {
+          addLog(req, 'Origin Engellendi', `Farklı kaynaktan (${origin}) gelen istek reddedildi`, 'security');
+          save(false);
+          return res.status(403).json({ error: 'Farklı kaynaktan istek gönderilemez.' });
+        }
+      } catch {
+        return res.status(403).json({ error: 'Geçersiz Origin.' });
+      }
+    }
+  }
+  next();
+});
+
 function requireEdit(req, res, next) {
   if (!req.auth.canEdit) {
-    return res.status(403).json({ error: 'Bu işlem için düzenleme yetkiniz yok. Yöneticiden yetki isteyin.' });
+    return res.status(403).json({ error: 'Bu işlem için düzenleme yetkiniz yok. Yetkili hesabınızla giriş yapın.' });
   }
   next();
 }
 
 function requireAdmin(req, res, next) {
   if (!req.auth.canAdmin) {
+    addLog(req, 'Yetkisiz Admin Erişimi', `Yetkisiz kullanıcı (${req.auth.name || 'Anonim'}) admin API'sine erişmeye çalıştı: ${req.path}`, 'security');
+    save(false);
     return res.status(403).json({ error: 'Bu alan yalnızca Admin ve Kurucu yetkisine açıktır.' });
   }
   next();
 }
 
-// Brute-force koruması (giriş denemeleri)
-const loginAttempts = new Map(); // ip -> { count, resetAt }
-function checkRateLimit(ip) {
+// 4. Hesap & Oturum Bazlı Brute-Force Koruması (Aynı IP'deki diğer ekip üyelerini etkilemez!)
+const loginAttempts = new Map(); // key (username veya sid) -> { count, lockUntil }
+function checkLoginLock(key) {
+  const rec = loginAttempts.get(key);
+  if (!rec) return 0;
   const now = Date.now();
-  const rec = loginAttempts.get(ip);
-  if (!rec || now > rec.resetAt) return true;
-  return rec.count < 12;
+  if (rec.lockUntil && now < rec.lockUntil) return Math.ceil((rec.lockUntil - now) / 1000);
+  return 0;
 }
-function recordFailedLogin(ip) {
-  const now = Date.now();
-  const rec = loginAttempts.get(ip);
-  if (!rec || now > rec.resetAt) loginAttempts.set(ip, { count: 1, resetAt: now + 10 * 60 * 1000 });
-  else rec.count++;
+function recordFailedAttempt(key) {
+  const rec = loginAttempts.get(key) || { count: 0, lockUntil: 0 };
+  rec.count++;
+  if (rec.count >= 5) {
+    const lockSec = rec.count >= 10 ? 300 : 45;
+    rec.lockUntil = Date.now() + lockSec * 1000;
+  }
+  loginAttempts.set(key, rec);
+  return rec.count;
+}
+function clearFailedAttempts(key) {
+  loginAttempts.delete(key);
 }
 
 app.use('/files', express.static(UPLOAD_DIR, { maxAge: '365d', immutable: true, dotfiles: 'allow' }));
@@ -603,127 +662,101 @@ app.get('/api/state', (req, res) => {
   });
 });
 
-/* ---- Kimlik Doğrulama & Profil ---- */
+/* ---- Kimlik Doğrulama & Kendi Profilini Düzenleme ---- */
 app.post('/api/auth/login', async (req, res) => {
-  const ip = req.auth.ip;
-  if (!checkRateLimit(ip)) {
-    return res.status(429).json({ error: 'Çok fazla başarısız giriş denemesi. Lütfen 10 dakika sonra tekrar deneyin.' });
-  }
-  const username = sanitizeUsername(req.body.username);
+  const rawInput = String(req.body.username || '').trim();
+  const username = sanitizeUsername(rawInput);
   const password = String(req.body.password || '');
-  const user = db.users.find((u) => u.username === username || u.name.toLowerCase() === String(req.body.username || '').trim().toLowerCase());
+  if (!rawInput || !password) return res.status(400).json({ error: 'Kullanıcı adı ve şifre girin.' });
+
+  const lockUser = checkLoginLock('u:' + username);
+  const lockSess = checkLoginLock('s:' + req.auth.sid);
+  const waitSec = Math.max(lockUser, lockSess);
+  if (waitSec > 0) {
+    return res.status(429).json({ error: `Çok fazla hatalı deneme. Lütfen ${waitSec} saniye bekleyin.` });
+  }
+
+  const user = db.users.find((u) => u.username === username || u.name.toLowerCase() === rawInput.toLowerCase());
   if (!user || !user.pwHash || !(await passwords.verify(password, user.pwHash))) {
-    recordFailedLogin(ip);
+    const c1 = recordFailedAttempt('u:' + username);
+    recordFailedAttempt('s:' + req.auth.sid);
+    if (c1 >= 5) {
+      addLog(req, 'Brute-Force Uyarısı', `“${rawInput}” hesabına üst üste ${c1} hatalı şifre denemesi yapıldı (geçici kilit uygulandı)`, 'security');
+      save(false);
+    }
     return res.status(401).json({ error: 'Kullanıcı adı veya şifre hatalı.' });
   }
-  const ban = checkBan(user.id, ip);
-  if (ban) return res.status(403).json({ error: 'Bu hesap engellenmiş.', banned: true, reason: ban.reason });
+
+  const ban = checkBan(user, req.auth.devId);
+  if (ban) return res.status(403).json({ error: 'Bu hesap yönetici tarafından engellenmiş.', banned: true, reason: ban.reason });
+
+  clearFailedAttempts('u:' + username);
+  clearFailedAttempts('s:' + req.auth.sid);
 
   req.auth.sess.userId = user.id;
-  req.auth.sess.explicitLogout = false;
-  user.lastIp = ip;
   user.lastSeen = Date.now();
+  setCookies(req, res, { bk_auth: signAuthToken(user) });
 
-  // Kurucu yeni bir IP'den giriş yaptıysa o IP'yi otomatik olarak Kurucu IP'lerine ekle
-  if (user.role === 'owner' && !db.ipRules.some((r) => r.ip === ip)) {
-    db.ipRules.push({
-      id: uid(),
-      ip,
-      label: 'Kaan (Otomatik Kurucu IP)',
-      role: 'owner',
-      createdBy: user.name,
-      createdAt: Date.now(),
-    });
-  }
-
-  req.auth = resolveAuth(req, res);
-  addLog(req, 'Giriş', `“${user.name}” (${ROLE_LABEL[req.auth.role]}) hesabına giriş yaptı`);
-  save(false);
-  res.json({ me: publicMe(req.auth) });
-});
-
-app.post('/api/auth/register', async (req, res) => {
-  const name = sanitize(req.body.name, 40);
-  if (!name) return res.status(400).json({ error: 'Görünen ad gerekli.' });
-  let username = sanitizeUsername(req.body.username || name);
-  if (username.length < 2) username = 'uye_' + uid().slice(0, 6);
-  if (db.users.some((u) => u.username === username)) {
-    return res.status(400).json({ error: 'Bu kullanıcı adı zaten kullanılıyor. Başka bir kullanıcı adı seçin.' });
-  }
-  const pw = String(req.body.password || '');
-  if (pw && pw.length < 4) return res.status(400).json({ error: 'Şifre en az 4 karakter olmalı.' });
-
-  const user = {
-    id: uid(),
-    username,
-    name,
-    pwHash: pw ? await passwords.hash(pw) : '',
-    role: 'viewer',
-    avatar: '',
-    lastIp: req.auth.ip,
-    lastSeen: Date.now(),
-    createdAt: Date.now(),
-  };
-  db.users.push(user);
-  req.auth.sess.userId = user.id;
-  req.auth.sess.explicitLogout = false;
-  req.auth = resolveAuth(req, res);
-  addLog(req, 'Profil Oluşturma', `“${user.name}” (@${user.username}) profilini oluşturdu`);
+  refreshAuth(req);
+  addLog(req, 'Giriş', `“${user.name}” (@${user.username}) hesabına giriş yaptı`);
   save(false);
   res.json({ me: publicMe(req.auth) });
 });
 
 app.post('/api/auth/logout', (req, res) => {
+  if (req.auth.user) {
+    addLog(req, 'Çıkış', `“${req.auth.user.name}” (@${req.auth.user.username}) çıkış yaptı`);
+  }
   req.auth.sess.userId = null;
-  req.auth.sess.explicitLogout = true;
-  req.auth = resolveAuth(req, res);
+  setCookies(req, res, { bk_auth: '' });
+  refreshAuth(req);
   save(false);
   res.json({ me: publicMe(req.auth) });
 });
 
+// Giriş yapmış kullanıcı kendi adını, kullanıcı adını ve şifresini değiştirebilir
 app.patch('/api/profile', async (req, res) => {
-  const name = sanitize(req.body.name, 40);
-  if (!name) return res.status(400).json({ error: 'Görünen ad boş olamaz.' });
-  let user = req.auth.user;
+  const user = req.auth.user;
+  if (!user) return res.status(401).json({ error: 'Bilgilerinizi düzenlemek için önce hesabınıza giriş yapın.' });
 
-  if (!user) {
-    // Anonim kullanıcı ilk kez profil adı kaydediyor
-    let baseU = sanitizeUsername(req.body.username || name) || 'uye';
-    let username = baseU;
-    for (let n = 2; db.users.some((u) => u.username === username); n++) username = `${baseU}${n}`;
-    user = {
-      id: uid(),
-      username,
-      name,
-      pwHash: req.body.password ? await passwords.hash(String(req.body.password)) : '',
-      role: 'viewer',
-      avatar: '',
-      lastIp: req.auth.ip,
-      lastSeen: Date.now(),
-      createdAt: Date.now(),
-    };
-    db.users.push(user);
-    req.auth.sess.userId = user.id;
-    req.auth.sess.explicitLogout = false;
-    req.auth = resolveAuth(req, res);
-    addLog(req, 'Profil Oluşturma', `“${user.name}” profil oluşturdu`);
-  } else {
-    const oldName = user.name;
-    user.name = name;
-    if (req.body.username) {
-      const uName = sanitizeUsername(req.body.username);
-      if (uName.length >= 2 && !db.users.some((u) => u.id !== user.id && u.username === uName)) {
-        user.username = uName;
-      }
+  const changes = [];
+  if ('name' in req.body) {
+    const name = sanitize(req.body.name, 40);
+    if (!name) return res.status(400).json({ error: 'Görünen ad boş olamaz.' });
+    if (name !== user.name) {
+      changes.push(`görünen adını “${user.name}” → “${name}” yaptı`);
+      user.name = name;
     }
-    if (req.body.password) {
-      if (String(req.body.password).length < 4) return res.status(400).json({ error: 'Şifre en az 4 karakter olmalı.' });
-      user.pwHash = await passwords.hash(String(req.body.password));
-    }
-    req.auth = resolveAuth(req, res);
-    addLog(req, 'Profil Güncelleme', oldName !== name ? `Adını “${oldName}” → “${name}” olarak güncelledi` : 'Profil bilgilerini güncelledi');
   }
-  save(false);
+  if ('username' in req.body) {
+    const uName = sanitizeUsername(req.body.username);
+    if (uName.length < 2) return res.status(400).json({ error: 'Kullanıcı adı en az 2 karakter olmalı.' });
+    if (db.users.some((u) => u.id !== user.id && u.username === uName)) {
+      return res.status(400).json({ error: 'Bu kullanıcı adı başka bir profilde kullanılıyor.' });
+    }
+    if (uName !== user.username) {
+      changes.push(`kullanıcı adını @${user.username} → @${uName} yaptı`);
+      user.username = uName;
+    }
+  }
+  if (req.body.newPassword) {
+    const curPw = String(req.body.currentPassword || '');
+    const newPw = String(req.body.newPassword || '');
+    if (newPw.length < 4) return res.status(400).json({ error: 'Yeni şifre en az 4 karakter olmalı.' });
+    if (user.pwHash && !(await passwords.verify(curPw, user.pwHash))) {
+      return res.status(401).json({ error: 'Mevcut şifrenizi yanlış girdiniz.' });
+    }
+    user.pwHash = await passwords.hash(newPw);
+    user.tokenVersion = (user.tokenVersion || 1) + 1;
+    setCookies(req, res, { bk_auth: signAuthToken(user) });
+    changes.push('şifresini değiştirdi');
+  }
+
+  refreshAuth(req);
+  if (changes.length) {
+    addLog(req, 'Profil Güncelleme', `Kendi profilinde ${changes.join(', ')}`);
+    save(false);
+  }
   res.json({ me: publicMe(req.auth) });
 });
 
@@ -731,17 +764,8 @@ app.post('/api/profile/avatar', avatarUpload.single('avatar'), async (req, res) 
   const f = req.file;
   if (!f) return res.status(400).json({ error: 'Görsel seçilmedi.' });
   try {
-    let user = req.auth.user;
-    if (!user) {
-      const uname = 'uye_' + uid().slice(0, 6);
-      user = {
-        id: uid(), username: uname, name: 'Üye', pwHash: '', role: 'viewer',
-        avatar: '', lastIp: req.auth.ip, lastSeen: Date.now(), createdAt: Date.now(),
-      };
-      db.users.push(user);
-      req.auth.sess.userId = user.id;
-      req.auth.sess.explicitLogout = false;
-    }
+    const user = req.auth.user;
+    if (!user) return res.status(401).json({ error: 'Profil fotoğrafı eklemek için önce giriş yapın.' });
     const buf = await fsp.readFile(f.path);
     const outPath = avatarPath(user.id);
     await sharp(buf, { limitInputPixels: false })
@@ -751,7 +775,7 @@ app.post('/api/profile/avatar', avatarUpload.single('avatar'), async (req, res) 
       .toFile(outPath);
     cloud.syncFileUp(outPath, `avatars/${user.id}.webp`);
     user.avatar = `/avatars/${user.id}.webp?v=${Date.now()}`;
-    req.auth = resolveAuth(req, res);
+    refreshAuth(req);
     addLog(req, 'Profil Fotoğrafı', 'Profil fotoğrafını güncelledi');
     save(false);
     res.json({ me: publicMe(req.auth) });
@@ -764,17 +788,17 @@ app.post('/api/profile/avatar', avatarUpload.single('avatar'), async (req, res) 
 
 app.delete('/api/profile/avatar', async (req, res) => {
   const user = req.auth.user;
-  if (!user) return res.status(400).json({ error: 'Profil bulunamadı.' });
+  if (!user) return res.status(401).json({ error: 'Profil bulunamadı.' });
   await safeUnlink(avatarPath(user.id));
   cloud.syncFileDel(`avatars/${user.id}.webp`);
   user.avatar = '';
-  req.auth = resolveAuth(req, res);
+  refreshAuth(req);
   addLog(req, 'Profil Fotoğrafı', 'Profil fotoğrafını kaldırdı');
   save(false);
   res.json({ me: publicMe(req.auth) });
 });
 
-/* ---- Admin Paneli API'leri ---- */
+/* ---- Admin Paneli API'leri (Yalnızca Admin ve Kurucu) ---- */
 app.get('/api/admin/overview', requireAdmin, (req, res) => {
   const now = Date.now();
   const activeSids = Object.entries(db.sessions)
@@ -782,34 +806,26 @@ app.get('/api/admin/overview', requireAdmin, (req, res) => {
 
   const onlineUserIds = new Set(activeSids.map(([, s]) => s.userId).filter(Boolean));
 
-  const users = db.users.map((u) => {
-    const ipRule = db.ipRules.find((r) => r.ip === u.lastIp);
-    const eff = maxRole(u.role, ipRule ? ipRule.role : 'viewer');
-    return {
-      id: u.id,
-      username: u.username,
-      name: u.name,
-      avatar: u.avatar || '',
-      role: u.role,
-      effectiveRole: eff,
-      roleLabel: ROLE_LABEL[eff] || 'İzleyici',
-      hasPassword: Boolean(u.pwHash),
-      lastIp: u.lastIp || '',
-      lastSeen: u.lastSeen || u.createdAt,
-      createdAt: u.createdAt,
-      online: onlineUserIds.has(u.id),
-      banned: db.bans.some((b) => (b.type === 'user' && b.target === u.id) || (b.type === 'ip' && b.target === u.lastIp)),
-    };
-  }).sort((a, b) => (ROLE_RANK[b.role] - ROLE_RANK[a.role]) || (b.online - a.online) || (b.lastSeen - a.lastSeen));
+  const users = db.users.map((u) => ({
+    id: u.id,
+    username: u.username,
+    name: u.name,
+    avatar: u.avatar || '',
+    role: u.role,
+    roleLabel: ROLE_LABEL[u.role] || 'İzleyici',
+    lastSeen: u.lastSeen || u.createdAt,
+    createdAt: u.createdAt,
+    createdBy: u.createdBy || 'Sistem',
+    online: onlineUserIds.has(u.id),
+    banned: Boolean(u.banned) || db.bans.some((b) => b.type === 'user' && b.target === u.id),
+    banReason: u.banReason || '',
+  })).sort((a, b) => (ROLE_RANK[b.role] - ROLE_RANK[a.role]) || (b.online - a.online) || (b.lastSeen - a.lastSeen));
 
   let anonIdx = 0;
   const seenOnlineUsers = new Map();
   const onlineSessions = [];
   for (const [sid, s] of activeSids.sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0))) {
     const u = s.userId ? db.users.find((x) => x.id === s.userId) : null;
-    const ipRule = db.ipRules.find((r) => r.ip === s.ip);
-    const role = maxRole(u ? u.role : 'viewer', ipRule ? ipRule.role : 'viewer');
-    const isAnon = !u;
     const isMe = sid === req.auth.sid;
     if (u) {
       if (seenOnlineUsers.has(u.id)) {
@@ -818,13 +834,13 @@ app.get('/api/admin/overview', requireAdmin, (req, res) => {
       }
       const row = {
         sidHash: sidKey(sid),
+        devId: s.devId || '',
         userId: u.id,
         name: u.name,
         username: u.username,
         avatar: u.avatar || '',
-        role,
-        roleLabel: ROLE_LABEL[role] || 'İzleyici',
-        ip: s.ip || '',
+        role: u.role,
+        roleLabel: ROLE_LABEL[u.role] || 'İzleyici',
         lastSeen: s.lastSeen,
         isAnon: false,
         isMe,
@@ -835,13 +851,13 @@ app.get('/api/admin/overview', requireAdmin, (req, res) => {
       anonIdx++;
       onlineSessions.push({
         sidHash: sidKey(sid),
+        devId: s.devId || '',
         userId: null,
         name: `Anonim - ${anonIdx}`,
         username: '',
         avatar: '',
-        role,
-        roleLabel: ROLE_LABEL[role] || 'İzleyici',
-        ip: s.ip || '',
+        role: 'viewer',
+        roleLabel: 'İzleyici',
         lastSeen: s.lastSeen,
         isAnon: true,
         isMe,
@@ -851,22 +867,22 @@ app.get('/api/admin/overview', requireAdmin, (req, res) => {
 
   res.json({
     me: publicMe(req.auth),
-    myIp: req.auth.ip,
     users,
     onlineSessions,
-    ipRules: db.ipRules,
     bans: db.bans,
-    logs: db.logs.slice(0, 400),
+    logs: db.logs.slice(0, 500),
   });
 });
 
-// Admin panelinden yeni yetkili kullanıcı oluşturma
+// Admin veya Kurucu tarafından yeni profil oluşturma (kullanıcı adı + şifre ile)
 app.post('/api/admin/users', requireAdmin, async (req, res) => {
   const name = sanitize(req.body.name, 40);
   const username = sanitizeUsername(req.body.username || name);
   const password = String(req.body.password || '').trim();
   const role = req.body.role || 'editor';
-  if (!name || !username) return res.status(400).json({ error: 'Ad ve kullanıcı adı gerekli.' });
+  if (!name || !username) return res.status(400).json({ error: 'Görünen ad ve kullanıcı adı gerekli.' });
+  if (username.length < 2) return res.status(400).json({ error: 'Kullanıcı adı en az 2 karakter olmalı.' });
+  if (password.length < 4) return res.status(400).json({ error: 'Şifre en az 4 karakter olmalı.' });
   if (db.users.some((u) => u.username === username)) return res.status(400).json({ error: 'Bu kullanıcı adı zaten mevcut.' });
   if (!['viewer', 'editor', 'admin'].includes(role)) return res.status(400).json({ error: 'Geçersiz yetki.' });
   if (role === 'admin' && !req.auth.isOwner) {
@@ -876,31 +892,38 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
     id: uid(),
     username,
     name,
-    pwHash: password ? await passwords.hash(password) : '',
+    pwHash: await passwords.hash(password),
     role,
     avatar: '',
-    lastIp: '',
+    tokenVersion: 1,
+    banned: false,
+    banReason: '',
     lastSeen: Date.now(),
     createdAt: Date.now(),
+    createdBy: req.auth.name || 'Admin',
   };
   db.users.push(user);
-  addLog(req, 'Yetkili Oluşturma', `“${user.name}” (@${user.username}) profilini ${ROLE_LABEL[role]} yetkisiyle oluşturdu`);
+  addLog(req, 'Profil Oluşturma', `“${user.name}” (@${user.username}) profilini ${ROLE_LABEL[role]} yetkisiyle oluşturdu`);
   save(false);
-  res.json({ ok: true, user: { id: user.id, name: user.name, username: user.username, role: user.role } });
+  res.json({
+    ok: true,
+    user: { id: user.id, name: user.name, username: user.username, role: user.role, roleLabel: ROLE_LABEL[user.role] },
+  });
 });
 
-// Kullanıcı yetkisini veya bilgilerini güncelleme
+// Kullanıcı yetkisini, şifresini veya oturumlarını güncelleme
 app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
   const target = db.users.find((u) => u.id === req.params.id);
   if (!target) return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
-  if (target.role === 'owner') {
-    return res.status(403).json({ error: 'Kurucu (En Üst Yetki) hesabının yetkisi değiştirilemez.' });
+  if (target.role === 'owner' && !req.auth.isOwner) {
+    return res.status(403).json({ error: 'Kurucu (En Üst Yetki) hesabı düzenlenemez.' });
   }
-  if (target.role === 'admin' && !req.auth.isOwner) {
+  if (target.role === 'admin' && !req.auth.isOwner && target.id !== req.auth.user?.id) {
     return res.status(403).json({ error: 'Bir Admin hesabını yalnızca Kurucu düzenleyebilir.' });
   }
   const changes = [];
   if ('role' in req.body) {
+    if (target.role === 'owner') return res.status(403).json({ error: 'Kurucu hesabının yetkisi değiştirilemez.' });
     const newRole = req.body.role;
     if (!['viewer', 'editor', 'admin'].includes(newRole)) return res.status(400).json({ error: 'Geçersiz yetki.' });
     if (newRole === 'admin' && !req.auth.isOwner) {
@@ -916,11 +939,18 @@ app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
     if (n && n !== target.name) { changes.push(`adını “${target.name}” → “${n}” yaptı`); target.name = n; }
   }
   if (req.body.password) {
+    if (String(req.body.password).length < 4) return res.status(400).json({ error: 'Şifre en az 4 karakter olmalı.' });
     target.pwHash = await passwords.hash(String(req.body.password));
+    target.tokenVersion = (target.tokenVersion || 1) + 1;
     changes.push('şifresini sıfırladı');
   }
+  if (req.body.revokeSessions) {
+    target.tokenVersion = (target.tokenVersion || 1) + 1;
+    for (const s of Object.values(db.sessions)) if (s.userId === target.id) s.userId = null;
+    changes.push('tüm açık oturumlarını kapattı');
+  }
   if (changes.length) {
-    addLog(req, 'Yetki / Profil Değişikliği', `“${target.name}” kullanıcısının ${changes.join(', ')}`);
+    addLog(req, 'Yetki / Profil Yönetimi', `“${target.name}” (@${target.username}) kullanıcısının ${changes.join(', ')}`);
     save(false);
   }
   res.json({ ok: true });
@@ -935,99 +965,19 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
   await safeUnlink(avatarPath(target.id));
   cloud.syncFileDel(`avatars/${target.id}.webp`);
   for (const s of Object.values(db.sessions)) if (s.userId === target.id) s.userId = null;
+  db.bans = db.bans.filter((b) => !(b.type === 'user' && b.target === target.id));
   db.users = db.users.filter((u) => u.id !== target.id);
-  addLog(req, 'Kullanıcı Silme', `“${target.name}” (@${target.username}) profilini sildi`);
+  addLog(req, 'Profil Silme', `“${target.name}” (@${target.username}) profilini sildi`);
   save(false);
   res.json({ ok: true });
 });
 
-// Çevrimiçi bir oturuma (anonim olsa bile) anında yetki verme
-app.post('/api/admin/sessions/grant', requireAdmin, (req, res) => {
-  const { sidHash, role, mode = 'ip' } = req.body;
-  if (!['viewer', 'editor', 'admin'].includes(role)) return res.status(400).json({ error: 'Geçersiz yetki.' });
-  if (role === 'admin' && !req.auth.isOwner) return res.status(403).json({ error: 'Admin yetkisini yalnızca Kurucu verebilir.' });
-
-  const entry = Object.entries(db.sessions).find(([sid]) => sidKey(sid) === sidHash);
-  if (!entry) return res.status(404).json({ error: 'Oturum bulunamadı.' });
-  const [, sess] = entry;
-
-  if (mode === 'profile' || sess.userId) {
-    let u = sess.userId ? db.users.find((x) => x.id === sess.userId) : null;
-    if (!u) {
-      const uname = 'ekip_' + uid().slice(0, 5);
-      u = { id: uid(), username: uname, name: 'Ekip Üyesi', pwHash: '', role, avatar: '', lastIp: sess.ip, lastSeen: Date.now(), createdAt: Date.now() };
-      db.users.push(u);
-      sess.userId = u.id;
-    } else {
-      if (u.role === 'owner') return res.status(403).json({ error: 'Kurucu değiştirilemez.' });
-      u.role = role;
-    }
-    addLog(req, 'Yetki Değişikliği', `Çevrimiçi “${u.name}” kullanıcısına ${ROLE_LABEL[role]} yetkisi verdi`);
-  }
-  if (mode === 'ip' && sess.ip) {
-    let rule = db.ipRules.find((r) => r.ip === sess.ip);
-    if (rule && rule.role === 'owner') return res.status(403).json({ error: 'Kurucu IP kuralı değiştirilemez.' });
-    if (role === 'viewer') {
-      db.ipRules = db.ipRules.filter((r) => r.ip !== sess.ip);
-    } else if (rule) {
-      rule.role = role;
-    } else {
-      db.ipRules.push({ id: uid(), ip: sess.ip, label: 'Çevrimiçi Yetkilendirme', role, createdBy: req.auth.name || 'Admin', createdAt: Date.now() });
-    }
-    addLog(req, 'IP Yetkilendirme', `${sess.ip} IP adresine ${ROLE_LABEL[role]} yetkisi verdi`);
-  }
-  save(false);
-  res.json({ ok: true });
-});
-
-// IP Yetkilendirme Kuralları
-app.post('/api/admin/ip-rules', requireAdmin, (req, res) => {
-  const ip = normalizeIp(req.body.ip);
-  const label = sanitize(req.body.label || 'Yetkili IP', 60);
-  const role = req.body.role || 'editor';
-  if (!ip) return res.status(400).json({ error: 'Geçerli bir IP adresi girin.' });
-  if (!['editor', 'admin', 'owner'].includes(role)) return res.status(400).json({ error: 'Geçersiz yetki.' });
-  if ((role === 'admin' || role === 'owner') && !req.auth.isOwner) {
-    return res.status(403).json({ error: 'IP adresine Admin yetkisini yalnızca Kurucu verebilir.' });
-  }
-  let existing = db.ipRules.find((r) => r.ip === ip);
-  if (existing) {
-    if (existing.role === 'owner' && !req.auth.isOwner) return res.status(403).json({ error: 'Kurucu IP kuralı değiştirilemez.' });
-    existing.role = role;
-    existing.label = label;
-  } else {
-    db.ipRules.push({
-      id: uid(),
-      ip,
-      label,
-      role,
-      createdBy: req.auth.name || 'Admin',
-      createdAt: Date.now(),
-    });
-  }
-  addLog(req, 'IP Yetkilendirme', `${ip} (${label}) IP adresine ${ROLE_LABEL[role]} yetkisi tanımladı`);
-  save(false);
-  res.json({ ok: true });
-});
-
-app.delete('/api/admin/ip-rules/:id', requireAdmin, (req, res) => {
-  const rule = db.ipRules.find((r) => r.id === req.params.id);
-  if (!rule) return res.status(404).json({ error: 'Kural bulunamadı.' });
-  if ((rule.role === 'owner' || rule.role === 'admin') && !req.auth.isOwner) {
-    return res.status(403).json({ error: 'Bu IP yetkisini yalnızca Kurucu kaldırabilir.' });
-  }
-  db.ipRules = db.ipRules.filter((r) => r.id !== rule.id);
-  addLog(req, 'IP Yetki Kaldırma', `${rule.ip} (${rule.label}) IP yetkisini kaldırdı`);
-  save(false);
-  res.json({ ok: true });
-});
-
-// Engelleme (Ban / Uzaklaştırma)
+// Engelleme (Profil veya Cihaz Oturumu Bazlı – Ortak Ofis IP'sini Etkilemez!)
 app.post('/api/admin/bans', requireAdmin, (req, res) => {
   const userId = req.body.userId || null;
-  const ip = req.body.ip ? normalizeIp(req.body.ip) : null;
+  const devId = req.body.devId || null;
   const reason = sanitize(req.body.reason || 'Yönetici tarafından siteden uzaklaştırıldı', 140);
-  if (!userId && !ip) return res.status(400).json({ error: 'Engellenecek kullanıcı veya IP seçilmeli.' });
+  if (!userId && !devId) return res.status(400).json({ error: 'Engellenecek profil veya oturum seçilmeli.' });
 
   if (userId) {
     const u = db.users.find((x) => x.id === userId);
@@ -1035,28 +985,29 @@ app.post('/api/admin/bans', requireAdmin, (req, res) => {
     if (u.role === 'owner') return res.status(403).json({ error: 'Kurucu engellenemez.' });
     if (u.role === 'admin' && !req.auth.isOwner) return res.status(403).json({ error: 'Bir Admini yalnızca Kurucu engelleyebilir.' });
     if (u.id === req.auth.user?.id) return res.status(400).json({ error: 'Kendinizi engelleyemezsiniz.' });
+
+    u.banned = true;
+    u.banReason = reason;
+    u.tokenVersion = (u.tokenVersion || 1) + 1;
     if (!db.bans.some((b) => b.type === 'user' && b.target === u.id)) {
       db.bans.unshift({
         id: uid(), type: 'user', target: u.id, targetName: `${u.name} (@${u.username})`,
         reason, createdBy: req.auth.name || 'Admin', createdAt: Date.now(),
       });
     }
-    addLog(req, 'Kullanıcı Engelleme', `“${u.name}” kullanıcısını siteden uzaklaştırdı (${reason})`);
+    addLog(req, 'Profil Engelleme', `“${u.name}” (@${u.username}) profilini siteden uzaklaştırdı (${reason})`, 'security');
   }
 
-  if (ip) {
-    if (ip === req.auth.ip) return res.status(400).json({ error: 'Kendi IP adresinizi engelleyemezsiniz.' });
-    const rule = db.ipRules.find((r) => r.ip === ip);
-    if (rule && rule.role === 'owner') return res.status(403).json({ error: 'Kurucu IP adresi engellenemez.' });
-    if (rule && rule.role === 'admin' && !req.auth.isOwner) return res.status(403).json({ error: 'Admin IP adresini yalnızca Kurucu engelleyebilir.' });
-    // Bu IP'deki admin yetkilerini de kontrol et
-    if (!db.bans.some((b) => b.type === 'ip' && b.target === ip)) {
+  if (devId) {
+    if (devId === req.auth.devId) return res.status(400).json({ error: 'Kendi tarayıcı oturumunuzu engelleyemezsiniz.' });
+    const targetName = sanitize(req.body.targetName || 'Anonim Cihaz', 50);
+    if (!db.bans.some((b) => b.type === 'device' && b.target === devId)) {
       db.bans.unshift({
-        id: uid(), type: 'ip', target: ip, targetName: req.body.targetName ? `${ip} (${sanitize(req.body.targetName, 40)})` : ip,
+        id: uid(), type: 'device', target: devId, targetName: `${targetName} (Cihaz #${devId.slice(0, 6)})`,
         reason, createdBy: req.auth.name || 'Admin', createdAt: Date.now(),
       });
     }
-    addLog(req, 'IP Engelleme', `${ip} IP adresini siteden uzaklaştırdı (${reason})`);
+    addLog(req, 'Cihaz Uzaklaştırma', `${targetName} (Cihaz #${devId.slice(0, 6)}) oturumunu siteden uzaklaştırdı (${reason})`, 'security');
   }
 
   save(false);
@@ -1066,8 +1017,12 @@ app.post('/api/admin/bans', requireAdmin, (req, res) => {
 app.delete('/api/admin/bans/:id', requireAdmin, (req, res) => {
   const ban = db.bans.find((b) => b.id === req.params.id);
   if (!ban) return res.status(404).json({ error: 'Engel kaydı bulunamadı.' });
+  if (ban.type === 'user') {
+    const u = db.users.find((x) => x.id === ban.target);
+    if (u) { u.banned = false; u.banReason = ''; }
+  }
   db.bans = db.bans.filter((b) => b.id !== ban.id);
-  addLog(req, 'Engel Kaldırma', `${ban.targetName} üzerindeki engeli kaldırdı`);
+  addLog(req, 'Engel Kaldırma', `${ban.targetName} üzerindeki erişim engelini kaldırdı`);
   save(false);
   res.json({ ok: true });
 });
@@ -1388,7 +1343,6 @@ setInterval(() => {
   for (const [id, t] of toolFiles) {
     if (t.created < limit) { safeUnlink(t.path); toolFiles.delete(id); }
   }
-  // 30 günden eski boş oturumları temizle
   const sessLimit = Date.now() - 30 * 24 * 3600 * 1000;
   for (const [sid, s] of Object.entries(db.sessions)) {
     if ((s.lastSeen || 0) < sessLimit) delete db.sessions[sid];

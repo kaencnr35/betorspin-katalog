@@ -1,6 +1,6 @@
 'use strict';
 /* ====================================================================
-   Betorspin Katalog – İstemci
+   Betorspin Katalog – İstemci (Profil & Hesap Tabanlı Güvenlik Sistemi)
    ==================================================================== */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -40,6 +40,13 @@ function renderRoleBadge(role) {
   return `<span class="role-badge ${esc(r)}">${ROLE_ICON[r] || '👁️'} ${esc(ROLE_NAME[r] || 'İzleyici')}</span>`;
 }
 
+function genPassword(len = 10) {
+  const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#';
+  const arr = new Uint32Array(len);
+  crypto.getRandomValues(arr);
+  return [...arr].map((x) => chars[x % chars.length]).join('');
+}
+
 /* ---------- Toast ---------- */
 function toast(msg, type = '', ms = 4200) {
   const el = document.createElement('div');
@@ -63,9 +70,9 @@ function showBanScreen(reason) {
   document.body.append(div);
 }
 
-/* ---------- API ---------- */
+/* ---------- API (CSRF Korumalı) ---------- */
 async function api(url, o = {}) {
-  const headers = {};
+  const headers = { 'X-Requested-With': 'BetorspinKatalog' };
   let body;
   if (o.form) body = o.form;
   else if (o.body !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(o.body); }
@@ -204,10 +211,11 @@ setInterval(async () => {
     const r = await api('/api/rev');
     $('#syncDot').classList.remove('off');
     const prevRole = S.me.role;
+    const prevAnon = S.me.isAnon;
     if (r.me) S.me = r.me;
     if (r.presence) { S.presence = r.presence; renderTopbar(); }
     if (r.rev !== S.rev && !S.busy) await loadState();
-    else if (prevRole !== S.me.role) render();
+    else if (prevRole !== S.me.role || prevAnon !== S.me.isAnon) render();
   } catch { $('#syncDot').classList.add('off'); }
 }, 4000);
 
@@ -238,12 +246,19 @@ function renderTopbar() {
   const me = S.me;
   const p = S.presence || { totalOnline: 1, anonCount: 0, users: [], anonList: [] };
 
-  // Kullanıcı butonu
-  $('#userAvatar').outerHTML = renderAvatar(me.isAnon ? null : me).replace('class="av', 'id="userAvatar" class="av');
-  $('#userName').textContent = me.name || p.myAnonLabel || 'Anonim';
-  const rb = $('#userRoleBadge');
-  rb.className = `role-badge ${me.role || 'viewer'}`;
-  rb.textContent = `${ROLE_ICON[me.role] || '👁️'} ${ROLE_NAME[me.role] || 'İzleyici'}`;
+  if (me.isAnon) {
+    $('#userAvatar').outerHTML = '<span id="userAvatar" class="av">🔑</span>';
+    $('#userName').textContent = 'Giriş Yap';
+    const rb = $('#userRoleBadge');
+    rb.className = 'role-badge viewer';
+    rb.textContent = p.myAnonLabel || 'İzleyici';
+  } else {
+    $('#userAvatar').outerHTML = renderAvatar(me).replace('class="av', 'id="userAvatar" class="av');
+    $('#userName').textContent = me.name;
+    const rb = $('#userRoleBadge');
+    rb.className = `role-badge ${me.role || 'viewer'}`;
+    rb.textContent = `${ROLE_ICON[me.role] || '👁️'} ${ROLE_NAME[me.role] || 'İzleyici'}`;
+  }
 
   // Çevrimiçi sayacı ve hover menüsü
   $('#onlineCount').textContent = p.totalOnline || 1;
@@ -491,59 +506,68 @@ async function deleteCategory(id) {
   }
 }
 
-/* ---------- Profil & Hesap Modalı ---------- */
+/* ---------- Giriş & Profil Modalı ---------- */
 function openProfileModal() {
   const me = S.me;
   const m = openModal('', { cls: 'wide' });
-  let mode = 'profile'; // 'profile' | 'login'
+  let mode = me.isAnon ? 'login' : 'profile';
 
   const draw = () => {
     if (mode === 'login') {
       m.set(`<h3>🔑 Hesaba Giriş Yap</h3>
         <div class="body">
-          <p class="muted small">Yetkili bir profiliniz varsa kullanıcı adı ve şifrenizle giriş yapın.</p>
-          <div class="field"><label>Kullanıcı adı veya görünen ad</label><input type="text" id="lgUser" placeholder="ör. kaan"></div>
-          <div class="field"><label>Şifre</label><input type="password" id="lgPass" placeholder="••••••••"></div>
+          <p class="muted small">Yöneticinizden aldığınız kullanıcı adı ve şifre ile giriş yapın. Girişiniz bu tarayıcıda kalıcı olarak hatırlanır.</p>
+          <div class="field"><label>Kullanıcı adı</label><input type="text" id="lgUser" placeholder="ör. kaan" autocomplete="username"></div>
+          <div class="field"><label>Şifre</label><input type="password" id="lgPass" placeholder="••••••••" autocomplete="current-password"></div>
         </div>
         <div class="foot">
-          <button data-p="back">← Geri</button>
+          ${!me.isAnon ? '<button data-p="back">← Profilime Dön</button>' : ''}
+          <button data-p="close">Vazgeç</button>
           <button class="primary" data-p="dologin">Giriş Yap</button>
         </div>`);
-      $('#lgUser', m.el)?.focus();
+      const uIn = $('#lgUser', m.el);
+      if (uIn) uIn.focus();
+      m.el.onkeydown = (e) => { if (e.key === 'Enter') $('[data-p="dologin"]', m.el)?.click(); };
       return;
     }
 
-    m.set(`<h3>👤 Profil &amp; Hesap Ayarları</h3>
+    m.el.onkeydown = null;
+    m.set(`<h3>👤 Profilim &amp; Hesap Bilgilerim</h3>
       <div class="body">
         <div class="profile-box">
-          ${renderAvatar(me.isAnon ? null : me, 'lg')}
+          ${renderAvatar(me, 'lg')}
           <div style="flex:1;min-width:0">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <b style="font-size:16px">${esc(me.name || 'Anonim Ziyaretçi')}</b>
+              <b style="font-size:16px">${esc(me.name)}</b>
               ${renderRoleBadge(me.role)}
             </div>
             <div class="muted small" style="margin-top:2px">
-              ${me.username ? `@${esc(me.username)} · ` : ''}${me.canEdit ? 'Katalogda düzenleme ve yükleme yetkiniz aktif.' : 'Şu an izleyici modundasınız. Düzenleme için yöneticiden yetki isteyin.'}
+              @${esc(me.username)} · Kalıcı oturum aktif
             </div>
             <div class="row-btns" style="margin-top:8px">
-              <button data-p="pickav" class="mini" style="font-size:12px;padding:3px 10px">📷 Fotoğraf Yükle</button>
-              ${me.avatar ? `<button data-p="delav" class="mini danger" style="font-size:12px;padding:3px 10px">Kaldır</button>` : ''}
+              <button data-p="pickav" class="mini" style="font-size:12px;padding:3px 10px">📷 Fotoğraf Yükle / Değiştir</button>
+              ${me.avatar ? `<button data-p="delav" class="mini danger" style="font-size:12px;padding:3px 10px">Fotoğrafı Kaldır</button>` : ''}
             </div>
           </div>
         </div>
         <div class="field"><label>Görünen Adın (ekip listesinde ve yüklemelerde görünür)</label>
-          <input type="text" id="prName" value="${esc(me.name || '')}" placeholder="Adını yaz…"></div>
-        <div class="field"><label>Kullanıcı Adı (giriş yaparken kullanılır)</label>
-          <input type="text" id="prUser" value="${esc(me.username || '')}" placeholder="ör. kaan"></div>
-        <div class="field"><label>Şifre Belirle / Değiştir <span class="muted">(değiştirmek istemiyorsan boş bırak)</span></label>
-          <input type="password" id="prPass" placeholder="Yeni şifre (en az 4 karakter)"></div>
+          <input type="text" id="prName" value="${esc(me.name || '')}"></div>
+        <div class="field"><label>Kullanıcı Adın (giriş yaparken kullandığın k.adı)</label>
+          <input type="text" id="prUser" value="${esc(me.username || '')}"></div>
+        <div style="border-top:1px solid var(--line);margin:14px 0 10px;padding-top:10px">
+          <div class="muted small" style="margin-bottom:6px">🔒 Şifreni değiştirmek istiyorsan aşağıyı doldur (istemiyorsan boş bırak):</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div class="field" style="margin:0"><label>Mevcut Şifren</label><input type="password" id="prCurPass" placeholder="Mevcut şifren"></div>
+            <div class="field" style="margin:0"><label>Yeni Şifren</label><input type="password" id="prNewPass" placeholder="Yeni şifre (en az 4 karakter)"></div>
+          </div>
+        </div>
       </div>
       <div class="foot">
-        <button data-p="loginmode">🔑 Başka Hesaba Giriş</button>
-        ${!me.isAnon ? '<button data-p="logout" class="danger">Çıkış Yap</button>' : ''}
+        <button data-p="loginmode">🔑 Farklı Hesaba Geç</button>
+        <button data-p="logout" class="danger">Çıkış Yap</button>
         <div class="spacer"></div>
         <button data-p="close">Kapat</button>
-        <button class="primary" data-p="save">Kaydet</button>
+        <button class="primary" data-p="save">Bilgilerimi Güncelle</button>
       </div>`);
   };
 
@@ -562,14 +586,15 @@ function openProfileModal() {
     if (actName === 'save') {
       const name = $('#prName', m.el).value.trim();
       const username = $('#prUser', m.el).value.trim();
-      const password = $('#prPass', m.el).value;
-      const r = await act(() => api('/api/profile', { method: 'PATCH', body: { name, username, password } }), 'Profil kaydedildi');
+      const currentPassword = $('#prCurPass', m.el).value;
+      const newPassword = $('#prNewPass', m.el).value;
+      const r = await act(() => api('/api/profile', { method: 'PATCH', body: { name, username, currentPassword, newPassword } }), 'Profil bilgilerin güncellendi');
       if (r) { S.me = r.me; m.close(); await loadState(); }
     }
     if (actName === 'dologin') {
       const username = $('#lgUser', m.el).value.trim();
       const password = $('#lgPass', m.el).value;
-      const r = await act(() => api('/api/auth/login', { method: 'POST', body: { username, password } }), 'Hoş geldin!');
+      const r = await act(() => api('/api/auth/login', { method: 'POST', body: { username, password } }), 'Giriş başarılı, hoş geldin!');
       if (r) { S.me = r.me; m.close(); await loadState(); }
     }
     if (actName === 'logout') {
@@ -643,8 +668,10 @@ document.addEventListener('keydown', (e) => {
   if (e.key === '/' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName) && !modals.length) { e.preventDefault(); $('#search').focus(); }
 });
 $('#btnUser').onclick = openProfileModal;
+$('#readonlyNotice').onclick = openProfileModal;
+$('#readonlyNotice').style.cursor = 'pointer';
 
-/* ---------- Sürükle-bırak (yalnızca düzenleme yetkisi olanlar) ---------- */
+/* ---------- Sürükle-bırak ---------- */
 document.addEventListener('dragstart', (e) => {
   if (!S.me.canEdit) return;
   const card = e.target.closest && e.target.closest('.card');
@@ -1149,8 +1176,30 @@ $('#toolResults').addEventListener('click', async (e) => {
 });
 
 /* ====================================================================
-   Admin Paneli
+   Admin & Güvenlik Paneli
    ==================================================================== */
+function showCredentialsCard({ name, username, password, roleLabel, title = '✅ Profil Oluşturuldu' }) {
+  const text = `Betorspin Katalog Giriş Bilgileri\nSite: ${location.origin}\nGörünen Ad: ${name}\nKullanıcı Adı: ${username}\nŞifre: ${password}\nYetki: ${roleLabel}\n(Giriş yaptıktan sonra sağ üstteki profilinden adını, şifreni ve profil fotoğrafını değiştirebilirsin.)`;
+  const m = openModal(`<h3>${esc(title)}</h3>
+    <div class="body">
+      <p class="muted small">Bu bilgileri kopyalayıp ekip arkadaşına iletebilirsin. Bu bilgilerle kalıcı giriş yapabilir ve isterse kendi profilinden değiştirebilir.</p>
+      <pre style="background:#08080a;border:1px solid var(--accent-line);padding:12px 14px;border-radius:12px;white-space:pre-wrap;font-size:13px;line-height:1.6">${esc(text)}</pre>
+    </div>
+    <div class="foot">
+      <button data-c="close">Kapat</button>
+      <button class="primary" data-c="copy">📋 Bilgileri Kopyala</button>
+    </div>`);
+  m.el.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-c]');
+    if (!b) return;
+    if (b.dataset.c === 'close') m.close();
+    if (b.dataset.c === 'copy') {
+      await navigator.clipboard.writeText(text);
+      toast('📋 Giriş bilgileri panoya kopyalandı', 'ok');
+    }
+  });
+}
+
 async function loadAdminOverview() {
   if (!S.me.canAdmin) return;
   const d = await act(() => api('/api/admin/overview'));
@@ -1172,11 +1221,12 @@ function renderAdmin() {
   if (!d) { $('#adminBody').innerHTML = '<div class="muted">Yükleniyor…</div>'; return; }
 
   const isOwner = S.me.isOwner;
+  const secLogs = d.logs.filter((l) => l.severity === 'security');
   $('#adminStats').innerHTML = `
-    <div class="stat-card"><div class="lbl">Senin Yetkin</div><div class="val">${renderRoleBadge(S.me.role)}</div><div class="sub">IP: <span class="code-ip">${esc(d.myIp)}</span></div></div>
-    <div class="stat-card"><div class="lbl">Çevrimiçi Kişiler</div><div class="val">${d.onlineSessions.length} aktif</div><div class="sub">${d.onlineSessions.filter((s) => s.isAnon).length} anonim · ${d.onlineSessions.filter((s) => !s.isAnon).length} profil</div></div>
-    <div class="stat-card"><div class="lbl">Profiller &amp; IP İzinleri</div><div class="val">${d.users.length} profil</div><div class="sub">${d.ipRules.length} yetkili IP kuralı</div></div>
-    <div class="stat-card"><div class="lbl">Güvenlik &amp; Kayıtlar</div><div class="val">${d.logs.length} işlem</div><div class="sub">${d.bans.length} aktif engel</div></div>
+    <div class="stat-card"><div class="lbl">Senin Hesabın</div><div class="val">${renderRoleBadge(S.me.role)}</div><div class="sub">@${esc(S.me.username)} · Kalıcı Oturum</div></div>
+    <div class="stat-card"><div class="lbl">Çevrimiçi Kişiler</div><div class="val">${d.onlineSessions.length} aktif</div><div class="sub">${d.onlineSessions.filter((s) => s.isAnon).length} anonim · ${d.onlineSessions.filter((s) => !s.isAnon).length} giriş yapmış</div></div>
+    <div class="stat-card"><div class="lbl">Kayıtlı Profiller</div><div class="val">${d.users.length} profil</div><div class="sub">${d.users.filter((u) => u.role === 'admin' || u.role === 'owner').length} admin/kurucu · ${d.users.filter((u) => u.role === 'editor').length} editör</div></div>
+    <div class="stat-card"><div class="lbl">Güvenlik Duvarı</div><div class="val">${secLogs.length} uyarı</div><div class="sub">${d.bans.length} aktif engel · ${d.logs.length} toplam kayıt</div></div>
   `;
 
   if (S.adminTab === 'users') {
@@ -1192,23 +1242,40 @@ function renderAdmin() {
 
     $('#adminBody').innerHTML = `
       <div class="admin-card">
-        <h3><span>🟢 Şu An Sitede Olan Kişiler (${d.onlineSessions.length})</span><span class="muted small">Buradan anlık olarak kişilere/IP'lere yetki verebilir veya siteden uzaklaştırabilirsiniz</span></h3>
+        <h3><span>➕ Yeni Ekip Profili Oluştur (Kullanıcı Adı &amp; Şifre Dağıtımı)</span><span class="muted small">Oluşturduğunuz k.adı ve şifre ile ekip arkadaşınız kalıcı giriş yapabilir</span></h3>
+        <div class="admin-form">
+          <div class="f"><label>Görünen Ad</label><input type="text" id="nuName" placeholder="ör. Ahmet"></div>
+          <div class="f"><label>Kullanıcı Adı (Giriş için)</label><input type="text" id="nuUser" placeholder="ör. ahmet"></div>
+          <div class="f"><label>Başlangıç Şifresi</label>
+            <div class="inline"><input type="text" id="nuPass" value="${esc(genPassword(8))}" style="flex:1"><button type="button" class="mini" data-act="gen-pw" title="Rastgele şifre üret">🎲</button></div>
+          </div>
+          <div class="f"><label>Yetki Seviyesi</label><select id="nuRole">
+            <option value="editor">✏️ Editör (Düzenleme Yetkisi)</option>
+            ${isOwner ? '<option value="admin">🛡️ Admin (Admin Paneli &amp; Profil Açma)</option>' : ''}
+            <option value="viewer">👁️ İzleyici (Sadece Görüntüleme)</option>
+          </select></div>
+          <button class="primary" data-act="create-user">＋ Profili Oluştur &amp; Bilgileri Al</button>
+        </div>
+
+        <h3 style="margin-top:18px"><span>👥 Kayıtlı Tüm Profiller (${d.users.length})</span></h3>
         <table class="res-table">
-          <thead><tr><th>Kişi</th><th>IP Adresi</th><th>Mevcut Yetki</th><th>Hızlı İşlem</th></tr></thead>
+          <thead><tr><th>Profil</th><th>Kullanıcı Adı</th><th>Oluşturan</th><th>Son Görülme</th><th>Yetki Seviyesi</th><th>İşlemler</th></tr></thead>
           <tbody>
-            ${d.onlineSessions.map((s) => `
-              <tr>
-                <td><div class="inline">${renderAvatar(s.isAnon ? null : s)}<div><b>${esc(s.name)}</b>${s.isMe ? ' <span class="badge good">Sen</span>' : ''}${s.username ? `<div class="muted small">@${esc(s.username)}</div>` : ''}</div></div></td>
-                <td><span class="code-ip">${esc(s.ip)}</span></td>
-                <td>${renderRoleBadge(s.role)}</td>
+            ${d.users.map((u) => `
+              <tr data-uid="${u.id}">
+                <td><div class="inline">${renderAvatar(u)}<div><b>${esc(u.name)}</b> ${u.online ? '<span class="badge good">Çevrimiçi</span>' : ''} ${u.banned ? '<span class="badge bad">Engelli</span>' : ''}</div></div></td>
+                <td><span class="code-ip">@${esc(u.username)}</span></td>
+                <td class="muted small">${esc(u.createdBy || 'Sistem')}</td>
+                <td class="muted small">${fmtDate(u.lastSeen)}</td>
+                <td>${roleSelect(u.role, u.role === 'owner', u.role === 'admin')}</td>
                 <td>
-                  ${s.role === 'owner' ? '<span class="muted small">En Üst Yetki</span>' : `
+                  ${u.role === 'owner' ? '<span class="muted small">Kurucu Hesap</span>' : (u.role === 'admin' && !isOwner ? '<span class="muted small">Admin</span>' : `
                     <div class="row-btns">
-                      <button class="mini" style="font-size:12px;padding:3px 9px" data-act="grant-sess" data-sid="${s.sidHash}" data-role="editor">✏️ Editör Yap</button>
-                      ${isOwner ? `<button class="mini" style="font-size:12px;padding:3px 9px" data-act="grant-sess" data-sid="${s.sidHash}" data-role="admin">🛡️ Admin Yap</button>` : ''}
-                      ${s.role !== 'viewer' ? `<button class="mini" style="font-size:12px;padding:3px 9px" data-act="grant-sess" data-sid="${s.sidHash}" data-role="viewer">Yetkiyi Al</button>` : ''}
-                      ${!s.isMe ? `<button class="mini danger" style="font-size:12px;padding:3px 9px" data-act="ban-ip" data-ip="${esc(s.ip)}" data-name="${esc(s.name)}">🚫 Uzaklaştır</button>` : ''}
-                    </div>`}
+                      <button class="mini" style="font-size:12px;padding:3px 9px" data-act="pw-user" data-uid="${u.id}" data-uname="${esc(u.username)}" data-name="${esc(u.name)}" data-role="${esc(u.roleLabel)}">🔑 Şifre Sıfırla</button>
+                      <button class="mini" style="font-size:12px;padding:3px 9px" data-act="revoke-user" data-uid="${u.id}" data-name="${esc(u.name)}" title="Açık tüm cihazlarından çıkış yaptır">🔒 Oturumu Kapat</button>
+                      <button class="mini danger" style="font-size:12px;padding:3px 9px" data-act="ban-user" data-uid="${u.id}" data-name="${esc(u.name)}">🚫 Engelle</button>
+                      <button class="mini danger" style="font-size:12px;padding:3px 9px" data-act="del-user" data-uid="${u.id}" data-name="${esc(u.name)}">🗑</button>
+                    </div>`)}
                 </td>
               </tr>`).join('')}
           </tbody>
@@ -1216,64 +1283,20 @@ function renderAdmin() {
       </div>
 
       <div class="admin-card">
-        <h3><span>👥 Tüm Profiller &amp; Yetkililer (${d.users.length})</span></h3>
-        <div class="admin-form">
-          <div class="f"><label>Görünen Ad</label><input type="text" id="nuName" placeholder="ör. Ahmet"></div>
-          <div class="f"><label>Kullanıcı Adı</label><input type="text" id="nuUser" placeholder="ör. ahmet"></div>
-          <div class="f"><label>Şifre</label><input type="password" id="nuPass" placeholder="Giriş şifresi"></div>
-          <div class="f"><label>Yetki Seviyesi</label><select id="nuRole">
-            <option value="editor">✏️ Editör (Düzenleme Yetkisi)</option>
-            ${isOwner ? '<option value="admin">🛡️ Admin (Admin Paneli)</option>' : ''}
-            <option value="viewer">👁️ İzleyici</option>
-          </select></div>
-          <button class="primary" data-act="create-user">＋ Yeni Yetkili Profil Ekle</button>
-        </div>
+        <h3><span>🟢 Şu An Sitede Olan Kişiler (${d.onlineSessions.length})</span><span class="muted small">Ortak IP kullanılsa bile her tarayıcı/cihaz ayrı oturum olarak izole edilir</span></h3>
         <table class="res-table">
-          <thead><tr><th>Profil</th><th>Kullanıcı Adı</th><th>Son IP</th><th>Son Görülme</th><th>Profil Yetkisi</th><th>İşlem</th></tr></thead>
+          <thead><tr><th>Kişi / Oturum</th><th>Durum</th><th>Yetki</th><th>İşlem</th></tr></thead>
           <tbody>
-            ${d.users.map((u) => `
-              <tr data-uid="${u.id}">
-                <td><div class="inline">${renderAvatar(u)}<div><b>${esc(u.name)}</b> ${u.online ? '<span class="badge good">Çevrimiçi</span>' : ''} ${u.banned ? '<span class="badge bad">Engelli</span>' : ''}</div></div></td>
-                <td>@${esc(u.username)}</td>
-                <td>${u.lastIp ? `<span class="code-ip">${esc(u.lastIp)}</span>` : '—'}</td>
-                <td class="muted small">${fmtDate(u.lastSeen)}</td>
-                <td>${roleSelect(u.role, u.role === 'owner', u.role === 'admin')}</td>
-                <td>
-                  ${u.role === 'owner' ? '<span class="muted small">Kurucu Hesap</span>' : (u.role === 'admin' && !isOwner ? '<span class="muted small">Admin</span>' : `
-                    <div class="row-btns">
-                      <button class="mini" style="font-size:12px;padding:3px 9px" data-act="pw-user" data-uid="${u.id}" data-name="${esc(u.name)}">🔑 Şifre</button>
-                      <button class="mini danger" style="font-size:12px;padding:3px 9px" data-act="ban-user" data-uid="${u.id}" data-ip="${esc(u.lastIp)}" data-name="${esc(u.name)}">🚫 Engelle</button>
-                      <button class="mini danger" style="font-size:12px;padding:3px 9px" data-act="del-user" data-uid="${u.id}" data-name="${esc(u.name)}">🗑</button>
-                    </div>`)}
-                </td>
-              </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>`;
-  } else if (S.adminTab === 'ips') {
-    $('#adminBody').innerHTML = `
-      <div class="admin-card">
-        <h3><span>🌐 IP Adresine Göre Yetkilendirme</span><span class="muted small">Buraya eklenen IP adreslerinden siteye giren kişiler şifre girmese bile seçilen yetkiye sahip olur</span></h3>
-        <div class="admin-form">
-          <div class="f"><label>IP Adresi</label><input type="text" id="nipAddr" placeholder="ör. 178.220.247.115"></div>
-          <div class="f"><label>Açıklama / Kişi Adı</label><input type="text" id="nipLabel" placeholder="ör. Ofis / Mehmet Ev"></div>
-          <div class="f"><label>Verilecek Yetki</label><select id="nipRole">
-            <option value="editor">✏️ Editör (Düzenleme Yetkisi)</option>
-            ${isOwner ? '<option value="admin">🛡️ Admin (Admin Paneli)</option>' : ''}
-          </select></div>
-          <button class="primary" data-act="add-ip">＋ IP Yetkisi Ekle</button>
-        </div>
-        <table class="res-table">
-          <thead><tr><th>IP Adresi</th><th>Açıklama</th><th>Yetki</th><th>Ekleyen</th><th>Tarih</th><th></th></tr></thead>
-          <tbody>
-            ${d.ipRules.map((r) => `
+            ${d.onlineSessions.map((s) => `
               <tr>
-                <td><span class="code-ip">${esc(r.ip)}</span></td>
-                <td><b>${esc(r.label)}</b></td>
-                <td>${renderRoleBadge(r.role)}</td>
-                <td class="muted small">${esc(r.createdBy || '—')}</td>
-                <td class="muted small">${fmtDate(r.createdAt)}</td>
-                <td>${(r.role === 'owner' || r.role === 'admin') && !isOwner ? '' : `<button class="mini danger" style="font-size:12px;padding:3px 9px" data-act="del-ip" data-id="${r.id}">Kaldır</button>`}</td>
+                <td><div class="inline">${renderAvatar(s.isAnon ? null : s)}<div><b>${esc(s.name)}</b>${s.isMe ? ' <span class="badge good">Sen</span>' : ''}${s.username ? `<div class="muted small">@${esc(s.username)}</div>` : ''}</div></div></td>
+                <td class="muted small">${s.isAnon ? 'Giriş yapmamış ziyaretçi' : 'Giriş yapmış profil'}</td>
+                <td>${renderRoleBadge(s.role)}</td>
+                <td>
+                  ${s.isMe || s.role === 'owner' ? '<span class="muted small">—</span>' : `
+                    <button class="mini danger" style="font-size:12px;padding:3px 9px" data-act="ban-dev" data-dev="${esc(s.devId)}" data-uid="${esc(s.userId || '')}" data-name="${esc(s.name)}">🚫 Bu Kişiyi / Cihazı Uzaklaştır</button>
+                  `}
+                </td>
               </tr>`).join('')}
           </tbody>
         </table>
@@ -1281,26 +1304,25 @@ function renderAdmin() {
   } else if (S.adminTab === 'logs') {
     const q = S.logFilter.trim().toLowerCase();
     const list = q
-      ? d.logs.filter((l) => (l.actorName || '').toLowerCase().includes(q) || (l.action || '').toLowerCase().includes(q) || (l.detail || '').toLowerCase().includes(q) || (l.ip || '').includes(q))
+      ? d.logs.filter((l) => (l.actorName || '').toLowerCase().includes(q) || (l.action || '').toLowerCase().includes(q) || (l.detail || '').toLowerCase().includes(q))
       : d.logs;
 
     $('#adminBody').innerHTML = `
       <div class="admin-card">
         <h3>
           <span>📜 Tüm İşlem Geçmişi (${list.length})</span>
-          <input type="search" id="logSearch" value="${esc(S.logFilter)}" placeholder="Kişi, işlem, dosya adı veya IP ara…" style="width:280px">
+          <input type="search" id="logSearch" value="${esc(S.logFilter)}" placeholder="Kişi, işlem veya dosya adı ara…" style="width:280px">
         </h3>
         <table class="res-table">
-          <thead><tr><th>Tarih / Saat</th><th>Kişi</th><th>IP Adresi</th><th>İşlem</th><th>Detay</th></tr></thead>
+          <thead><tr><th>Tarih / Saat</th><th>Kişi</th><th>İşlem</th><th>Detay</th></tr></thead>
           <tbody>
             ${list.map((l) => `
               <tr>
                 <td class="muted small" style="white-space:nowrap">${fmtDate(l.ts)}</td>
                 <td><div class="inline"><b>${esc(l.actorName)}</b> ${renderRoleBadge(l.actorRole)}</div></td>
-                <td><span class="code-ip">${esc(l.ip || '—')}</span></td>
-                <td><span class="badge neutral">${esc(l.action)}</span></td>
+                <td><span class="badge ${l.severity === 'security' ? 'bad' : 'neutral'}">${esc(l.action)}</span></td>
                 <td>${esc(l.detail)}</td>
-              </tr>`).join('') || '<tr><td colspan="5" class="muted">Henüz işlem kaydı yok.</td></tr>'}
+              </tr>`).join('') || '<tr><td colspan="4" class="muted">Henüz işlem kaydı yok.</td></tr>'}
           </tbody>
         </table>
       </div>`;
@@ -1313,27 +1335,48 @@ function renderAdmin() {
         if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
       };
     }
+  } else if (S.adminTab === 'security') {
+    $('#adminBody').innerHTML = `
+      <div class="admin-card">
+        <h3><span>🛡️ Aktif Güvenlik Katmanları</span></h3>
+        <div class="admin-stats" style="margin-bottom:0">
+          <div class="stat-card"><div class="lbl">Veri &amp; Yetki İzolasyonu</div><div class="val" style="font-size:15px;color:var(--ok)">✓ Aktif</div><div class="sub">Kullanıcı listesi, şifre özetleri ve işlem geçmişi yalnızca Admin/Kurucu oturumlarına açıktır.</div></div>
+          <div class="stat-card"><div class="lbl">Kalıcı Kriptografik Oturum</div><div class="val" style="font-size:15px;color:var(--ok)">✓ HMAC-SHA256 + scrypt</div><div class="sub">HttpOnly çerezler JS/XSS ile okunamaz; şifre değiştiğinde eski jetonlar anında iptal olur.</div></div>
+          <div class="stat-card"><div class="lbl">WAF &amp; CSRF Koruması</div><div class="val" style="font-size:15px;color:var(--ok)">✓ Aktif</div><div class="sub">Dış sitelerden sahte istekler (CSRF), XSS, Path Traversal ve tarayıcı bot saldırıları otomatik engellenir.</div></div>
+          <div class="stat-card"><div class="lbl">Brute-Force Koruması</div><div class="val" style="font-size:15px;color:var(--ok)">✓ Hesap Bazlı</div><div class="sub">Aynı ofis IP'sini etkilemeden yalnızca hedef hesaba yönelik şifre denemelerini kilitler.</div></div>
+        </div>
+      </div>
+      <div class="admin-card">
+        <h3><span>🚨 Güvenlik &amp; Saldırı Kayıtları (${secLogs.length})</span></h3>
+        <table class="res-table">
+          <thead><tr><th>Tarih / Saat</th><th>Kişi / Oturum</th><th>Olay</th><th>Detay</th></tr></thead>
+          <tbody>
+            ${secLogs.map((l) => `
+              <tr>
+                <td class="muted small" style="white-space:nowrap">${fmtDate(l.ts)}</td>
+                <td><b>${esc(l.actorName)}</b></td>
+                <td><span class="badge bad">${esc(l.action)}</span></td>
+                <td>${esc(l.detail)}</td>
+              </tr>`).join('') || '<tr><td colspan="4" class="muted">Şu ana kadar engellenen bir saldırı veya güvenlik ihlali kaydı yok.</td></tr>'}
+          </tbody>
+        </table>
+      </div>`;
   } else if (S.adminTab === 'bans') {
     $('#adminBody').innerHTML = `
       <div class="admin-card">
-        <h3><span>🚫 Siteden Uzaklaştırılan Kişiler &amp; IP'ler (${d.bans.length})</span><span class="muted small">Engellenen kişi veya IP siteyi görüntüleyemez ve hiçbir işlem yapamaz</span></h3>
-        <div class="admin-form">
-          <div class="f"><label>Engellenecek IP Adresi</label><input type="text" id="banIpInput" placeholder="ör. 185.x.x.x"></div>
-          <div class="f"><label>Sebep / Not</label><input type="text" id="banReasonInput" placeholder="ör. İzinsiz giriş denemesi"></div>
-          <button class="danger" data-act="manual-ban">🚫 IP'yi Engelle</button>
-        </div>
+        <h3><span>🚫 Siteden Uzaklaştırılan Profiller &amp; Cihazlar (${d.bans.length})</span><span class="muted small">Ortak IP'deki diğer ekip arkadaşlarını etkilemeden yalnızca ilgili profili veya tarayıcı cihazını engeller</span></h3>
         <table class="res-table">
           <thead><tr><th>Tür</th><th>Hedef</th><th>Sebep</th><th>Engelleyen</th><th>Tarih</th><th></th></tr></thead>
           <tbody>
             ${d.bans.map((b) => `
               <tr>
-                <td><span class="badge bad">${b.type === 'ip' ? 'IP Engeli' : 'Kullanıcı Engeli'}</span></td>
+                <td><span class="badge bad">${b.type === 'user' ? 'Profil Engeli' : 'Cihaz Oturum Engeli'}</span></td>
                 <td><b>${esc(b.targetName || b.target)}</b></td>
                 <td>${esc(b.reason)}</td>
                 <td class="muted small">${esc(b.createdBy)}</td>
                 <td class="muted small">${fmtDate(b.createdAt)}</td>
                 <td><button class="mini" style="font-size:12px;padding:3px 10px" data-act="unban" data-id="${b.id}">Engeli Kaldır</button></td>
-              </tr>`).join('') || '<tr><td colspan="6" class="muted">Engellenmiş kişi veya IP bulunmuyor.</td></tr>'}
+              </tr>`).join('') || '<tr><td colspan="6" class="muted">Engellenmiş profil veya cihaz bulunmuyor.</td></tr>'}
           </tbody>
         </table>
       </div>`;
@@ -1356,64 +1399,58 @@ $('#adminBody').addEventListener('click', async (e) => {
   if (!b) return;
   const a = b.dataset.act;
 
+  if (a === 'gen-pw') {
+    const inp = $('#nuPass');
+    if (inp) inp.value = genPassword(8);
+  }
   if (a === 'create-user') {
     const name = $('#nuName').value.trim();
     const username = $('#nuUser').value.trim();
-    const password = $('#nuPass').value;
+    const password = $('#nuPass').value.trim();
     const role = $('#nuRole').value;
-    if (await act(() => api('/api/admin/users', { method: 'POST', body: { name, username, password, role } }), 'Yeni yetkili profil oluşturuldu')) {
+    const res = await act(() => api('/api/admin/users', { method: 'POST', body: { name, username, password, role } }), 'Yeni profil oluşturuldu');
+    if (res && res.user) {
       await loadAdminOverview();
+      showCredentialsCard({ name: res.user.name, username: res.user.username, password, roleLabel: res.user.roleLabel });
     }
   }
   if (a === 'pw-user') {
-    const pw = await askText({ title: `“${b.dataset.name}” için yeni şifre`, label: 'Yeni şifre', ok: 'Güncelle' });
+    const pw = await askText({ title: `🔑 “${b.dataset.name}” için yeni şifre belirle`, label: 'Yeni şifre', value: genPassword(8), ok: 'Şifreyi Güncelle' });
     if (!pw) return;
-    if (await act(() => api('/api/admin/users/' + b.dataset.uid, { method: 'PATCH', body: { password: pw } }), 'Şifre güncellendi')) {
+    if (await act(() => api('/api/admin/users/' + b.dataset.uid, { method: 'PATCH', body: { password: pw } }), 'Şifre sıfırlandı')) {
+      await loadAdminOverview();
+      showCredentialsCard({
+        title: '🔑 Şifre Sıfırlandı',
+        name: b.dataset.name,
+        username: b.dataset.uname,
+        password: pw,
+        roleLabel: b.dataset.role,
+      });
+    }
+  }
+  if (a === 'revoke-user') {
+    if (!(await confirmBox({ title: 'Oturumları kapat', message: `<b>${esc(b.dataset.name)}</b> kullanıcısının açık tüm cihazlarındaki oturumu kapatılacak.`, ok: 'Oturumları Kapat' }))) return;
+    if (await act(() => api('/api/admin/users/' + b.dataset.uid, { method: 'PATCH', body: { revokeSessions: true } }), 'Kullanıcının tüm oturumları kapatıldı')) {
       await loadAdminOverview();
     }
   }
   if (a === 'del-user') {
-    if (!(await confirmBox({ title: 'Profili sil', message: `<b>${esc(b.dataset.name)}</b> profili silinecek.`, ok: 'Sil', danger: true }))) return;
+    if (!(await confirmBox({ title: 'Profili sil', message: `<b>${esc(b.dataset.name)}</b> profili kalıcı olarak silinecek.`, ok: 'Sil', danger: true }))) return;
     if (await act(() => api('/api/admin/users/' + b.dataset.uid, { method: 'DELETE' }), 'Profil silindi')) {
       await loadAdminOverview();
     }
   }
   if (a === 'ban-user') {
-    const reason = await askText({ title: `🚫 “${b.dataset.name}” kullanıcısını uzaklaştır`, label: 'Engelleme sebebi', value: 'Yönetici tarafından uzaklaştırıldı', ok: 'Uzaklaştır' });
+    const reason = await askText({ title: `🚫 “${b.dataset.name}” profilini uzaklaştır`, label: 'Engelleme sebebi', value: 'Yönetici tarafından uzaklaştırıldı', ok: 'Uzaklaştır' });
     if (!reason) return;
-    if (await act(() => api('/api/admin/bans', { method: 'POST', body: { userId: b.dataset.uid, ip: b.dataset.ip || null, reason } }), 'Kullanıcı siteden uzaklaştırıldı')) {
+    if (await act(() => api('/api/admin/bans', { method: 'POST', body: { userId: b.dataset.uid, reason } }), 'Profil siteden uzaklaştırıldı')) {
       await loadAdminOverview();
     }
   }
-  if (a === 'ban-ip') {
-    const reason = await askText({ title: `🚫 ${b.dataset.name} (${b.dataset.ip}) uzaklaştır`, label: 'Engelleme sebebi', value: 'Yönetici tarafından uzaklaştırıldı', ok: 'Uzaklaştır' });
+  if (a === 'ban-dev') {
+    const reason = await askText({ title: `🚫 “${b.dataset.name}” oturumunu uzaklaştır`, label: 'Engelleme sebebi', value: 'Yönetici tarafından uzaklaştırıldı', ok: 'Uzaklaştır' });
     if (!reason) return;
-    if (await act(() => api('/api/admin/bans', { method: 'POST', body: { ip: b.dataset.ip, targetName: b.dataset.name, reason } }), 'IP adresi siteden uzaklaştırıldı')) {
-      await loadAdminOverview();
-    }
-  }
-  if (a === 'grant-sess') {
-    if (await act(() => api('/api/admin/sessions/grant', { method: 'POST', body: { sidHash: b.dataset.sid, role: b.dataset.role, mode: 'ip' } }), 'Yetki güncellendi')) {
-      await loadAdminOverview();
-    }
-  }
-  if (a === 'add-ip') {
-    const ip = $('#nipAddr').value.trim();
-    const label = $('#nipLabel').value.trim();
-    const role = $('#nipRole').value;
-    if (await act(() => api('/api/admin/ip-rules', { method: 'POST', body: { ip, label, role } }), 'IP yetkisi eklendi')) {
-      await loadAdminOverview();
-    }
-  }
-  if (a === 'del-ip') {
-    if (await act(() => api('/api/admin/ip-rules/' + b.dataset.id, { method: 'DELETE' }), 'IP yetkisi kaldırıldı')) {
-      await loadAdminOverview();
-    }
-  }
-  if (a === 'manual-ban') {
-    const ip = $('#banIpInput').value.trim();
-    const reason = $('#banReasonInput').value.trim() || 'Yönetici tarafından engellendi';
-    if (await act(() => api('/api/admin/bans', { method: 'POST', body: { ip, reason } }), 'IP engellendi')) {
+    if (await act(() => api('/api/admin/bans', { method: 'POST', body: { userId: b.dataset.uid || null, devId: b.dataset.dev || null, targetName: b.dataset.name, reason } }), 'Kişi siteden uzaklaştırıldı')) {
       await loadAdminOverview();
     }
   }
