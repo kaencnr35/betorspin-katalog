@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Betorspin Katalog</title>
+  <link rel="icon" type="image/png" sizes="64x64" href="favicon.png?v=2">
+  <link rel="icon" type="image/png" sizes="192x192" href="favicon-192.png?v=2">
+  <link rel="apple-touch-icon" href="favicon-192.png?v=2">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css?v=3">
+</head>
+<body>
+  <div id="app">
+    <a class="brand" href="#/" title="Betorspin Katalog">
+      <img src="logo.webp" alt="BETORSPIN">
+      <span>KATALOG</span>
+    </a>
+    <header id="topbar">
+      <button id="btnMenu" class="icon-btn only-mobile" title="Menü">☰</button>
+      <div class="search">
+        <input id="search" type="search" placeholder="Tüm görsellerde ara…  ( / )" autocomplete="off">
+      </div>
+      <div class="spacer"></div>
+
+      <!-- Çevrimiçi Kişiler Göstergesi (Hover ile açılır) -->
+      <div id="onlineWrap" class="online-wrap">
+        <div class="online-pill" tabindex="0">
+          <span id="syncDot" class="sync"></span>
+          <span id="onlineCount" class="online-count">1</span>
+        </div>
+        <div id="onlinePopover" class="online-popover"></div>
+      </div>
+
+      <!-- Kullanıcı Profili & Yetki Rozeti -->
+      <button id="btnUser" class="user-btn" title="Profil & Hesap Ayarları">
+        <span id="userAvatar" class="av">👤</span>
+        <span id="userName">—</span>
+        <span id="userRoleBadge" class="role-badge"></span>
+      </button>
+    </header>
+
+    <aside id="sidebar">
+      <nav class="tabs">
+        <a href="#/" id="tabCatalog" class="tab active">📁 Katalog</a>
+        <a href="#/tools" id="tabTools" class="tab">⚡ Sıkıştır &amp; Boyutlandır</a>
+        <a href="#/admin" id="tabAdmin" class="tab admin-tab" hidden>🛡️ Admin Paneli</a>
+      </nav>
+      <div class="side-head">
+        <span>Kategoriler</span>
+        <button id="btnNewRootCat" class="mini edit-only" title="Yeni ana kategori">＋</button>
+      </div>
+      <div id="tree"></div>
+    </aside>
+
+    <main id="main">
+      <!-- KATALOG -->
+      <section id="viewCatalog">
+        <div class="toolbar">
+          <div id="crumbs" class="crumbs"></div>
+          <div class="spacer"></div>
+          <div class="btn-group" id="catActions"></div>
+        </div>
+        <div class="toolbar sub">
+          <button id="btnUpload" class="primary edit-only">⬆ Görsel yükle</button>
+          <button id="btnUploadFolder" class="edit-only">📂 Klasör yükle</button>
+          <button id="btnNewCat" class="edit-only">＋ Yeni kategori</button>
+          <span id="readonlyNotice" class="ro-notice" hidden>👁️ İzleyici modu · Düzenleme için yetki gerekir</span>
+          <div class="spacer"></div>
+          <select id="sizeFilter" title="Ölçüye göre filtrele"></select>
+          <select id="sortBy" title="Sırala">
+            <option value="name">Ada göre</option>
+            <option value="new">En yeni</option>
+            <option value="size">Dosya boyutu</option>
+          </select>
+          <input id="thumbSize" type="range" min="120" max="360" value="200" title="Önizleme boyutu">
+        </div>
+        <div id="tiles" class="tiles"></div>
+        <div id="gridInfo" class="grid-info"></div>
+        <div id="grid" class="grid"></div>
+        <div id="empty" class="empty" hidden></div>
+        <div id="dropHint" class="drop-hint" hidden>Görselleri veya klasörleri buraya bırak</div>
+      </section>
+
+      <!-- ARAÇLAR -->
+      <section id="viewTools" hidden>
+        <h2>⚡ Sıkıştır &amp; Boyutlandır</h2>
+        <p class="muted">Görselleri sürükle, ayarları seç, işle. Sonuçları indir veya doğrudan kataloğa kaydet. Bu araçta işlenen dosyalar katalogdan bağımsızdır.</p>
+        <div class="tools-layout">
+          <div>
+            <div id="toolDrop" class="dropzone">
+              <div class="dz-icon">⬆</div>
+              <div><b>Görselleri buraya sürükle</b> ya da tıkla</div>
+              <div class="muted small">PNG, JPG, WebP, GIF · çoklu seçim desteklenir</div>
+            </div>
+            <input id="toolFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+            <div id="toolQueue" class="queue"></div>
+          </div>
+          <div class="panel">
+            <div id="toolOptions"></div>
+            <button id="btnToolRun" class="primary big" disabled>İşlemi başlat</button>
+            <div id="toolProgress" class="progress" hidden><div></div></div>
+          </div>
+        </div>
+        <div id="toolResults"></div>
+      </section>
+
+      <!-- ADMİN PANELİ -->
+      <section id="viewAdmin" hidden>
+        <div class="admin-head">
+          <div>
+            <h2>🛡️ Admin &amp; Güvenlik Paneli</h2>
+            <p class="muted" style="margin:2px 0 0">Yetkileri, IP izinlerini, tüm düzenleme geçmişini ve erişim engellerini buradan yönetin.</p>
+          </div>
+          <button id="btnAdminRefresh">🔄 Yenile</button>
+        </div>
+        <div id="adminStats" class="admin-stats"></div>
+        <div class="admin-subtabs" id="adminSubtabs">
+          <button data-atab="users" class="active">👥 Profiller &amp; Çevrimiçi Kişiler</button>
+          <button data-atab="ips">🌐 IP Yetkilendirme</button>
+          <button data-atab="logs">📜 İşlem Geçmişi (Kim Ne Yaptı)</button>
+          <button data-atab="bans">🚫 Engellenenler</button>
+        </div>
+        <div id="adminBody"></div>
+      </section>
+    </main>
+
+    <div id="bulkBar" class="bulkbar" hidden></div>
+  </div>
+
+  <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+  <input id="folderInput" type="file" webkitdirectory multiple hidden>
+  <input id="avatarInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+  <div id="modalRoot"></div>
+  <div id="toasts"></div>
+  <script src="app.js?v=3"></script>
+</body>
+</html>

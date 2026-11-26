@@ -1,0 +1,19 @@
+{
+  "name": "betorspin-katalog",
+  "version": "1.0.0",
+  "description": "Betorspin Görsel Katalog & Yönetim Sistemi",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "archiver": "^8.0.0",
+    "express": "^5.3.0",
+    "multer": "^2.5.0",
+    "sharp": "^0.35.5"
+  }
+}
