@@ -517,7 +517,7 @@ function openProfileModal() {
       m.set(`<h3>🔑 Hesaba Giriş Yap</h3>
         <div class="body">
           <p class="muted small">Yöneticinizden aldığınız kullanıcı adı ve şifre ile giriş yapın. Girişiniz bu tarayıcıda kalıcı olarak hatırlanır.</p>
-          <div class="field"><label>Kullanıcı adı</label><input type="text" id="lgUser" placeholder="ör. kaan" autocomplete="username"></div>
+          <div class="field"><label>Kullanıcı adı</label><input type="text" id="lgUser" autocomplete="username"></div>
           <div class="field"><label>Şifre</label><input type="password" id="lgPass" placeholder="••••••••" autocomplete="current-password"></div>
         </div>
         <div class="foot">
@@ -928,7 +928,7 @@ const PRESETS = [[1280, 640], [500, 800], [1080, 1920], [1080, 1080], [1920, 108
 function buildOptions(host, { preset = 'compress', sample = null } = {}) {
   const n = ++optUid;
   host.innerHTML = `
-  <div class="opt-block"><label class="hd"><input type="checkbox" class="o-compress" ${preset !== 'resize' ? 'checked' : ''}> 🗜 Sıkıştır <span class="muted small">(TinyPNG tarzı)</span></label>
+  <div class="opt-block"><label class="hd"><input type="checkbox" class="o-compress" ${preset !== 'resize' ? 'checked' : ''}> 🗜 Sıkıştır</label>
     <div class="bd"><div class="radios">
       <label><input type="radio" name="lv${n}" value="lossless"><div><b>Kayıpsız</b><div class="d">Görüntü birebir aynı kalır, daha az tasarruf</div></div></label>
       <label><input type="radio" name="lv${n}" value="high"><div><b>Yüksek kalite</b><div class="d">Gözle fark edilmez, güvenli</div></div></label>
