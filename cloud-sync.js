@@ -80,7 +80,7 @@ async function restoreFromCloud(dataDir) {
     const tree = await gh(`/git/trees/${ref.object.sha}?recursive=1`, { allow404: true });
     if (!tree || !Array.isArray(tree.tree)) return false;
 
-    const items = tree.tree.filter((t) => t.type === 'blob' && (t.path === 'db.enc' || t.path.startsWith('uploads/') || t.path.startsWith('thumbs/') || t.path.startsWith('avatars/')));
+    const items = tree.tree.filter((t) => t.type === 'blob' && (t.path === 'db.enc' || t.path.startsWith('uploads/') || t.path.startsWith('thumbs/') || t.path.startsWith('avatars/') || t.path.startsWith('templates/')));
     if (!items.length) return false;
 
     console.log(`[CloudSync] ${items.length} dosya buluttan geri yükleniyor...`);

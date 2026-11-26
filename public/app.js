@@ -20,7 +20,7 @@ const ROLE_ICON = { owner: '👑', admin: '🛡️', editor: '✏️', viewer: '
 const ROLE_NAME = { owner: 'Kurucu', admin: 'Admin', editor: 'Editör', viewer: 'İzleyici' };
 
 const S = {
-  cats: [], imgs: [], rev: 0,
+  cats: [], imgs: [], templates: [], rev: 0,
   me: { id: null, username: '', name: '', avatar: '', role: 'viewer', roleLabel: 'İzleyici', canEdit: false, canAdmin: false, isOwner: false, isAnon: true },
   presence: { totalOnline: 1, anonCount: 0, anonSummary: '', anonList: [], users: [] },
   view: 'catalog', cur: null, query: '', sizeFilter: '', sortBy: 'name',
@@ -195,6 +195,7 @@ async function loadState() {
   try {
     const st = await api('/api/state');
     S.cats = st.categories; S.imgs = st.images; S.rev = st.rev;
+    if (st.templates) S.templates = st.templates;
     if (st.me) S.me = st.me;
     if (st.presence) S.presence = st.presence;
     const ids = new Set(S.imgs.map((i) => i.id));
@@ -304,6 +305,7 @@ function render() {
   renderTopbar();
   renderTree();
   if (S.view === 'catalog') renderCatalog();
+  if (S.view === 'domain') renderDomainTplBar();
   if (S.view === 'admin') renderAdmin();
   renderBulk();
 }
@@ -1535,9 +1537,48 @@ $('#adminBody').addEventListener('click', async (e) => {
 });
 
 /* ====================================================================
-   Otomatik Domain / Rakam Üretici
+   Genel Tasarım & Otomatik Domain Üretici (AI Olmadan Akıllı Tuval)
    ==================================================================== */
-const DOM = { img: null, ready: false };
+const FONTS = ['Poppins', 'Montserrat', 'Oswald', 'Bebas Neue', 'Anton', 'Arial'];
+const SWATCHES = ['#ffffff', '#050807', '#ff6a00', '#ff2a12', '#12e268', '#ffd600', '#00d2ff'];
+
+const DOM = {
+  ready: false,
+  activeTplId: 'default-betorspin-domain',
+  tplName: 'Betorspin Kare Domain',
+  bgUrl: '/domain-template.png',
+  uploadedFile: null,
+  isFreshUpload: false,
+  img: null,
+  cleanCanvas: document.createElement('canvas'),
+  mode: 'move', // 'move' | 'erase' | 'pick'
+  eraseMode: 'vertical', // 'vertical' | 'laplace' | 'horizontal' | 'solid'
+  eraseColor: '#111111',
+  patches: [],
+  layers: [],
+  selLayerId: null,
+  drag: null, // { type:'layer'|'erase', ... }
+  hoverBox: null,
+};
+
+function defaultBetorspinLayers() {
+  return [
+    {
+      id: 'l1', enabled: true, tpl: '{no}', x: 50, y: 245,
+      font: 'Poppins', weight: '700', size: 202, color: '#ffffff', align: 'left', angle: 0,
+      shadow: true, shadowColor: '#000000', shadowBlur: 14,
+      stroke: false, strokeColor: '#000000', strokeWidth: 4,
+      pill: false, pillColor1: '#ff7a1a', pillColor2: '#ff2a12', pillPadX: 24, pillPadY: 12, pillRadius: 14,
+    },
+    {
+      id: 'l2', enabled: true, tpl: 'www.{no}betorspin.com', x: 227, y: 681,
+      font: 'Poppins', weight: '500', size: 29, color: '#ffffff', align: 'center', angle: 0,
+      shadow: false, shadowColor: '#000000', shadowBlur: 8,
+      stroke: false, strokeColor: '#000000', strokeWidth: 2,
+      pill: false, pillColor1: '#ff7a1a', pillColor2: '#ff2a12', pillPadX: 24, pillPadY: 12, pillRadius: 14,
+    },
+  ];
+}
 
 function parseDomainNumbers(raw) {
   const s = String(raw || '').trim();
@@ -1554,32 +1595,698 @@ function parseDomainNumbers(raw) {
         if (out.length >= 150) break;
       }
     } else {
-      out.push(part.slice(0, 12));
+      out.push(part.slice(0, 24));
     }
     if (out.length >= 150) break;
   }
   return out.length ? [...new Set(out)] : ['801'];
 }
 
-function initDomainTool() {
-  if (DOM.ready) { drawDomainPreview(); return; }
-  DOM.ready = true;
-  loadDomainTemplate('/domain-template.png');
+function getSelectedLayer() {
+  return DOM.layers.find((l) => l.id === DOM.selLayerId) || DOM.layers[0] || null;
+}
 
-  ['#domInput', '#domUrlTpl', '#domBigSize', '#domUrlSize', '#domBigX', '#domBigY', '#domUrlX', '#domUrlY'].forEach((sel) => {
-    $(sel).addEventListener('input', drawDomainPreview);
+function selectTemplate(tpl) {
+  DOM.activeTplId = tpl.id;
+  DOM.tplName = tpl.name;
+  DOM.bgUrl = tpl.bgUrl;
+  DOM.uploadedFile = null;
+  DOM.isFreshUpload = false;
+  DOM.patches = JSON.parse(JSON.stringify(tpl.patches || []));
+  DOM.layers = JSON.parse(JSON.stringify(tpl.layers?.length ? tpl.layers : defaultBetorspinLayers()));
+  DOM.selLayerId = DOM.layers[0]?.id || null;
+  setDomMode('move');
+  renderDomainTplBar();
+  renderLayerList();
+  renderLayerEditor();
+  renderEraseBar();
+  loadDomainTemplate(tpl.bgUrl);
+}
+
+function renderDomainTplBar() {
+  const bar = $('#domTplBar');
+  if (!bar) return;
+  const list = S.templates?.length ? S.templates : [{
+    id: 'default-betorspin-domain', name: 'Betorspin Kare Domain', bgUrl: '/domain-template.png',
+    builtin: true, patches: [], layers: defaultBetorspinLayers(),
+  }];
+  bar.innerHTML = `<span class="muted small" style="margin-right:4px">Kayıtlı Şablonlar:</span>` +
+    list.map((t) => `<div class="tpl-chip ${DOM.activeTplId === t.id ? 'active' : ''}" data-tplid="${esc(t.id)}">
+      <span>🎨 ${esc(t.name)}</span>
+      ${!t.builtin && S.me.canEdit ? `<span class="del" data-deltpl="${esc(t.id)}" title="Şablonu sil">✕</span>` : ''}
+    </div>`).join('');
+}
+
+function setDomMode(m) {
+  DOM.mode = m;
+  $$('#domToolModes button').forEach((b) => b.classList.toggle('active', b.dataset.dmode === m));
+  const cv = $('#domainCanvas');
+  if (cv) cv.style.cursor = m === 'erase' ? 'crosshair' : m === 'pick' ? 'copy' : 'grab';
+  renderEraseBar();
+}
+
+function renderEraseBar() {
+  const bar = $('#domEraseBar');
+  if (!bar) return;
+  if (DOM.mode !== 'erase' && !DOM.patches.length) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.innerHTML = `
+    <span>🧽 <b>Silgi Modu:</b></span>
+    <select id="selEraseMode" style="padding:3px 8px;font-size:12px">
+      <option value="vertical" ${DOM.eraseMode === 'vertical' ? 'selected' : ''}>Dikey Geçiş (Buton / Şerit İçi Yazılar İçin En İyi)</option>
+      <option value="laplace" ${DOM.eraseMode === 'laplace' ? 'selected' : ''}>4 Yönlü Akıllı Arka Plan Doldurma</option>
+      <option value="horizontal" ${DOM.eraseMode === 'horizontal' ? 'selected' : ''}>Yatay Geçiş</option>
+      <option value="solid" ${DOM.eraseMode === 'solid' ? 'selected' : ''}>Tek Renk ile Kapat</option>
+    </select>
+    ${DOM.eraseMode === 'solid' ? `<input type="color" id="inpEraseColor" value="${esc(DOM.eraseColor)}">` : ''}
+    <div class="spacer"></div>
+    ${DOM.patches.length ? `<span class="muted">${DOM.patches.length} alan temizlendi</span>
+      <button type="button" class="mini" data-eract="undo" style="font-size:12px;padding:2px 8px">↩️ Geri Al</button>
+      <button type="button" class="mini danger" data-eract="clear" style="font-size:12px;padding:2px 8px">🧹 Silgileri Sıfırla</button>` : '<span class="muted">Görseldeki eski yazının üzerine fareyle dikdörtgen çizin</span>'}
+  `;
+}
+
+/** AI olmadan piksel interpolasyonu ile seçili dikdörtgen alandaki eski yazıyı temizler */
+function rebuildCleanCanvas() {
+  const cc = DOM.cleanCanvas;
+  if (!DOM.img) return;
+  const w = DOM.img.naturalWidth || 1080;
+  const h = DOM.img.naturalHeight || 1080;
+  cc.width = w;
+  cc.height = h;
+  const ctx = cc.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(DOM.img, 0, 0);
+  if (!DOM.patches.length) return;
+
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const d = imgData.data;
+
+  for (const p of DOM.patches) {
+    const x0 = Math.max(1, Math.min(w - 2, Math.round(p.x)));
+    const y0 = Math.max(1, Math.min(h - 2, Math.round(p.y)));
+    const x1 = Math.max(x0 + 1, Math.min(w - 2, Math.round(p.x + p.w)));
+    const y1 = Math.max(y0 + 1, Math.min(h - 2, Math.round(p.y + p.h)));
+    const mode = p.mode || 'vertical';
+
+    if (mode === 'solid') {
+      const hex = (p.color || '#000000').replace('#', '');
+      const sr = parseInt(hex.slice(0, 2), 16) || 0;
+      const sg = parseInt(hex.slice(2, 4), 16) || 0;
+      const sb = parseInt(hex.slice(4, 6), 16) || 0;
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          const i = (y * w + x) * 4;
+          d[i] = sr; d[i + 1] = sg; d[i + 2] = sb; d[i + 3] = 255;
+        }
+      }
+    } else if (mode === 'vertical') {
+      for (let x = x0; x <= x1; x++) {
+        const T = (y0 * w + x) * 4;
+        const B = (y1 * w + x) * 4;
+        for (let y = y0 + 1; y < y1; y++) {
+          const t = (y - y0) / (y1 - y0);
+          const i = (y * w + x) * 4;
+          d[i] = Math.round(d[T] * (1 - t) + d[B] * t);
+          d[i + 1] = Math.round(d[T + 1] * (1 - t) + d[B + 1] * t);
+          d[i + 2] = Math.round(d[T + 2] * (1 - t) + d[B + 2] * t);
+        }
+      }
+    } else if (mode === 'horizontal') {
+      for (let y = y0; y <= y1; y++) {
+        const L = (y * w + x0) * 4;
+        const R = (y * w + x1) * 4;
+        for (let x = x0 + 1; x < x1; x++) {
+          const t = (x - x0) / (x1 - x0);
+          const i = (y * w + x) * 4;
+          d[i] = Math.round(d[L] * (1 - t) + d[R] * t);
+          d[i + 1] = Math.round(d[L + 1] * (1 - t) + d[R + 1] * t);
+          d[i + 2] = Math.round(d[L + 2] * (1 - t) + d[R + 2] * t);
+        }
+      }
+    } else {
+      // 4-yönlü Laplace yumuşatma
+      for (let y = y0 + 1; y < y1; y++) {
+        const ty = (y - y0) / (y1 - y0);
+        const L = (y * w + x0) * 4;
+        const R = (y * w + x1) * 4;
+        for (let x = x0 + 1; x < x1; x++) {
+          const tx = (x - x0) / (x1 - x0);
+          const T = (y0 * w + x) * 4;
+          const B = (y1 * w + x) * 4;
+          const i = (y * w + x) * 4;
+          for (let k = 0; k < 3; k++) {
+            const hBlend = d[L + k] * (1 - tx) + d[R + k] * tx;
+            const vBlend = d[T + k] * (1 - ty) + d[B + k] * ty;
+            d[i + k] = Math.round((hBlend + vBlend) * 0.5);
+          }
+        }
+      }
+      for (let it = 0; it < 45; it++) {
+        for (let y = y0 + 1; y < y1; y++) {
+          for (let x = x0 + 1; x < x1; x++) {
+            const i = (y * w + x) * 4;
+            const L = i - 4, R = i + 4, T = i - w * 4, B = i + w * 4;
+            d[i] = (d[L] + d[R] + d[T] + d[B] + 2) >> 2;
+            d[i + 1] = (d[L + 1] + d[R + 1] + d[T + 1] + d[B + 1] + 2) >> 2;
+            d[i + 2] = (d[L + 2] + d[R + 2] + d[T + 2] + d[B + 2] + 2) >> 2;
+          }
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function renderLayerList() {
+  const host = $('#domLayerList');
+  if (!host) return;
+  host.innerHTML = DOM.layers.map((l, idx) => `
+    <div class="layer-item ${l.id === DOM.selLayerId ? 'active' : ''}" data-lid="${esc(l.id)}">
+      <input type="checkbox" class="l-toggle" ${l.enabled !== false ? 'checked' : ''} title="Göster / Gizle">
+      <span class="l-sw" style="background:${esc(l.color || '#ffffff')}"></span>
+      <span class="l-txt">${esc(l.tpl || `Katman ${idx + 1}`)}</span>
+      <span class="muted small">${l.size}px</span>
+      ${DOM.layers.length > 1 ? `<button type="button" class="mini danger l-del" title="Katmanı sil" style="padding:0 6px;font-size:13px">✕</button>` : ''}
+    </div>
+  `).join('');
+}
+
+function renderLayerEditor() {
+  const host = $('#domLayerEditor');
+  if (!host) return;
+  const l = getSelectedLayer();
+  if (!l) { host.innerHTML = '<div class="muted small">Düzenlemek için bir yazı katmanı ekleyin.</div>'; return; }
+
+  host.innerHTML = `
+    <div class="field" style="margin-top:4px">
+      <label style="display:flex;justify-content:space-between">
+        <span>Yazı Kalıbı (<code>{no}</code> otomatik değişir)</span>
+        <a href="javascript:void(0)" id="lnkInsertNo" style="color:var(--o1);text-decoration:none;font-weight:600">＋ {no} Ekle</a>
+      </label>
+      <input type="text" id="leTpl" value="${esc(l.tpl)}" placeholder="ör. {no}Baywin.com veya {no}" style="width:100%;font-weight:600">
+    </div>
+    <div style="display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:8px">
+      <div class="field" style="margin:0"><label>Yazı Tipi</label>
+        <select id="leFont" style="width:100%">${FONTS.map((f) => `<option value="${f}" ${l.font === f ? 'selected' : ''}>${f}</option>`).join('')}</select>
+      </div>
+      <div class="field" style="margin:0"><label>Kalınlık</label>
+        <select id="leWeight" style="width:100%">
+          <option value="500" ${l.weight === '500' ? 'selected' : ''}>Medium</option>
+          <option value="600" ${l.weight === '600' ? 'selected' : ''}>SemiBold</option>
+          <option value="700" ${l.weight === '700' ? 'selected' : ''}>Bold</option>
+          <option value="800" ${l.weight === '800' ? 'selected' : ''}>ExtraBold</option>
+          <option value="900" ${l.weight === '900' ? 'selected' : ''}>Black</option>
+        </select>
+      </div>
+      <div class="field" style="margin:0"><label>Boyut (px)</label>
+        <input type="number" id="leSize" value="${l.size}" min="10" max="500" style="width:100%">
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Yazı Rengi &amp; Hızlı Renkler</label>
+      <div class="swatches">
+        <input type="color" id="leColor" value="${esc(l.color || '#ffffff')}" style="width:34px;height:28px;padding:0;border:none;background:none;cursor:pointer">
+        ${SWATCHES.map((c) => `<button type="button" class="swatch" data-sw="${c}" style="background:${c}"></button>`).join('')}
+        <button type="button" class="mini" id="btnLePickColor" style="font-size:11px;padding:2px 8px">🎯 Görselden Seç</button>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+      <div class="field" style="margin:0"><label>Hizalama</label>
+        <select id="leAlign" style="width:100%">
+          <option value="left" ${l.align === 'left' ? 'selected' : ''}>Sola</option>
+          <option value="center" ${l.align === 'center' ? 'selected' : ''}>Ortala</option>
+          <option value="right" ${l.align === 'right' ? 'selected' : ''}>Sağa</option>
+        </select>
+      </div>
+      <div class="field" style="margin:0"><label>Eğim Açısı (°)</label>
+        <input type="number" id="leAngle" value="${l.angle || 0}" min="-90" max="90" style="width:100%">
+      </div>
+      <div class="field" style="margin:0"><label>Konum (X / Y)</label>
+        <div class="inline"><input type="number" id="leX" value="${Math.round(l.x)}" style="width:50%"><input type="number" id="leY" value="${Math.round(l.y)}" style="width:50%"></div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;padding-top:8px;border-top:1px solid var(--line)">
+      <label class="inline small"><input type="checkbox" id="leShadow" ${l.shadow ? 'checked' : ''}> Gölge</label>
+      <label class="inline small"><input type="checkbox" id="leStroke" ${l.stroke ? 'checked' : ''}> Dış Çizgi (Kontur)</label>
+      <label class="inline small"><input type="checkbox" id="lePill" ${l.pill ? 'checked' : ''}> Arka Plan Kutusu Çiz</label>
+    </div>
+
+    ${l.stroke ? `<div class="inline" style="margin-top:6px"><span class="muted small">Çizgi Rengi/Kalınlık:</span>
+      <input type="color" id="leStrokeColor" value="${esc(l.strokeColor || '#000000')}">
+      <input type="number" id="leStrokeWidth" value="${l.strokeWidth || 4}" min="1" max="30" style="width:70px"></div>` : ''}
+
+    ${l.pill ? `<div class="inline" style="margin-top:6px;flex-wrap:wrap"><span class="muted small">Kutu Renkleri:</span>
+      <input type="color" id="lePillC1" value="${esc(l.pillColor1 || '#ff7a1a')}">
+      <input type="color" id="lePillC2" value="${esc(l.pillColor2 || '#ff2a12')}">
+      <span class="muted small">Köşe:</span><input type="number" id="lePillRad" value="${l.pillRadius ?? 16}" min="0" max="80" style="width:60px">
+      <span class="muted small">İç Boşluk:</span><input type="number" id="lePillPad" value="${l.pillPadX ?? 26}" min="4" max="120" style="width:60px"></div>` : ''}
+  `;
+}
+
+function renderDomainToCanvas(numStr, showGuides = false) {
+  const cv = $('#domainCanvas');
+  if (!cv) return;
+  const ctx = cv.getContext('2d');
+  if (DOM.img) {
+    const w = DOM.img.naturalWidth || 1080;
+    const h = DOM.img.naturalHeight || 1080;
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+    ctx.drawImage(DOM.cleanCanvas, 0, 0);
+  } else {
+    ctx.fillStyle = '#140c08';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+  }
+
+  for (const l of DOM.layers) {
+    if (l.enabled === false) continue;
+    const text = String(l.tpl || '').replace(/\{no\}/gi, numStr);
+    if (!text) continue;
+
+    ctx.save();
+    ctx.translate(l.x, l.y);
+    if (l.angle) ctx.rotate((l.angle * Math.PI) / 180);
+    ctx.font = `${l.weight || '700'} ${l.size || 48}px "${l.font || 'Poppins'}", sans-serif`;
+    ctx.textAlign = l.align || 'center';
+    ctx.textBaseline = 'middle';
+
+    const m = ctx.measureText(text);
+    const tw = m.width;
+    const th = l.size || 48;
+    const bx = l.align === 'left' ? 0 : l.align === 'right' ? -tw : -tw / 2;
+    const by = -th / 2;
+
+    if (l.pill) {
+      const px = l.pillPadX ?? 26;
+      const py = l.pillPadY ?? Math.round((l.pillPadX ?? 26) * 0.48);
+      const rx = bx - px;
+      const ry = by - py;
+      const rw = tw + px * 2;
+      const rh = th + py * 2;
+      const rad = Math.min(l.pillRadius ?? 16, rh / 2);
+      const grad = ctx.createLinearGradient(rx, ry, rx + rw, ry);
+      grad.addColorStop(0, l.pillColor1 || '#ff7a1a');
+      grad.addColorStop(1, l.pillColor2 || '#ff2a12');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.roundRect(rx, ry, rw, rh, rad);
+      ctx.fill();
+    }
+
+    if (l.shadow) {
+      ctx.shadowColor = l.shadowColor || 'rgba(0, 0, 0, 0.5)';
+      ctx.shadowBlur = l.shadowBlur ?? 14;
+      ctx.shadowOffsetY = 4;
+    }
+
+    if (l.stroke) {
+      ctx.lineWidth = l.strokeWidth || 4;
+      ctx.strokeStyle = l.strokeColor || '#000000';
+      ctx.lineJoin = 'round';
+      ctx.strokeText(text, 0, 0);
+    }
+
+    ctx.fillStyle = l.color || '#ffffff';
+    ctx.fillText(text, 0, 0);
+
+    // Tuval üzerinde tıklama algılama için son ölçüleri sakla
+    l._bbox = { x: l.x + bx - 10, y: l.y + by - 10, w: tw + 20, h: th + 20 };
+
+    if (showGuides && l.id === DOM.selLayerId && DOM.mode === 'move') {
+      ctx.shadowColor = 'transparent';
+      ctx.strokeStyle = 'rgba(255, 122, 26, 0.85)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(bx - 10, by - 8, tw + 20, th + 16);
+    }
+    ctx.restore();
+  }
+
+  // Silgi kutusu çizilirken canlı seçim dikdörtgeni göster
+  if (showGuides && DOM.drag && DOM.drag.type === 'erase') {
+    const r = normRect(DOM.drag.sx, DOM.drag.sy, DOM.drag.cx, DOM.drag.cy);
+    ctx.save();
+    ctx.fillStyle = 'rgba(255, 90, 26, 0.22)';
+    ctx.strokeStyle = '#ff7a1a';
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([6, 4]);
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.strokeRect(r.x, r.y, r.w, r.h);
+    ctx.restore();
+  }
+}
+
+function normRect(x1, y1, x2, y2) {
+  return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+}
+
+function canvasCoords(e) {
+  const cv = $('#domainCanvas');
+  const rect = cv.getBoundingClientRect();
+  return {
+    x: ((e.clientX - rect.left) / rect.width) * cv.width,
+    y: ((e.clientY - rect.top) / rect.height) * cv.height,
+  };
+}
+
+function initDomainTool() {
+  if (!DOM.layers.length) {
+    const first = S.templates?.[0] || {
+      id: 'default-betorspin-domain', name: 'Betorspin Kare Domain', bgUrl: '/domain-template.png',
+      patches: [], layers: defaultBetorspinLayers(),
+    };
+    selectTemplate(first);
+  } else {
+    renderDomainTplBar();
+    drawDomainPreview(true);
+  }
+  if (DOM.ready) return;
+  DOM.ready = true;
+
+  $('#domTplBar').addEventListener('click', async (e) => {
+    const del = e.target.closest('[data-deltpl]');
+    if (del) {
+      e.stopPropagation();
+      const id = del.dataset.deltpl;
+      const t = S.templates.find((x) => x.id === id);
+      if (!(await confirmBox({ title: 'Şablonu sil', message: `<b>${esc(t?.name)}</b> şablonu silinecek.`, ok: 'Sil', danger: true }))) return;
+      if (await act(() => api('/api/templates/' + id, { method: 'DELETE' }), 'Şablon silindi')) {
+        await loadState();
+        if (DOM.activeTplId === id && S.templates.length) selectTemplate(S.templates[0]);
+      }
+      return;
+    }
+    const chip = e.target.closest('[data-tplid]');
+    if (chip) {
+      const t = S.templates.find((x) => x.id === chip.dataset.tplid);
+      if (t) selectTemplate(t);
+    }
   });
-  $('#btnDomDefaultTpl').onclick = () => loadDomainTemplate('/domain-template.png');
+
+  $('#domToolModes').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-dmode]');
+    if (b) { setDomMode(b.dataset.dmode); drawDomainPreview(true); }
+  });
+
+  $('#domEraseBar').addEventListener('change', (e) => {
+    if (e.target.id === 'selEraseMode') {
+      DOM.eraseMode = e.target.value;
+      if (DOM.patches.length) {
+        DOM.patches[DOM.patches.length - 1].mode = DOM.eraseMode;
+        rebuildCleanCanvas();
+        drawDomainPreview(true);
+      }
+      renderEraseBar();
+    }
+    if (e.target.id === 'inpEraseColor') {
+      DOM.eraseColor = e.target.value;
+      if (DOM.patches.length && DOM.eraseMode === 'solid') {
+        DOM.patches[DOM.patches.length - 1].color = DOM.eraseColor;
+        rebuildCleanCanvas();
+        drawDomainPreview(true);
+      }
+    }
+  });
+
+  $('#domEraseBar').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-eract]');
+    if (!b) return;
+    if (b.dataset.eract === 'undo') DOM.patches.pop();
+    if (b.dataset.eract === 'clear') DOM.patches = [];
+    rebuildCleanCanvas();
+    renderEraseBar();
+    drawDomainPreview(true);
+  });
+
+  $('#domInput').addEventListener('input', () => drawDomainPreview(true));
+
+  $('#btnDomAddLayer').onclick = () => {
+    const cv = $('#domainCanvas');
+    const nl = {
+      id: 'l_' + Date.now().toString(36),
+      enabled: true,
+      tpl: '{no}',
+      x: Math.round((cv.width || 1080) / 2),
+      y: Math.round((cv.height || 1080) / 2),
+      font: 'Poppins', weight: '700', size: 64, color: '#ffffff', align: 'center', angle: 0,
+      shadow: true, shadowColor: '#000000', shadowBlur: 12,
+      stroke: false, strokeColor: '#000000', strokeWidth: 4,
+      pill: false, pillColor1: '#ff7a1a', pillColor2: '#ff2a12', pillPadX: 26, pillPadY: 12, pillRadius: 16,
+    };
+    DOM.layers.push(nl);
+    DOM.selLayerId = nl.id;
+    setDomMode('move');
+    renderLayerList();
+    renderLayerEditor();
+    drawDomainPreview(true);
+  };
+
+  $('#domLayerList').addEventListener('click', (e) => {
+    const row = e.target.closest('.layer-item');
+    if (!row) return;
+    const id = row.dataset.lid;
+    const layer = DOM.layers.find((l) => l.id === id);
+    if (!layer) return;
+    if (e.target.classList.contains('l-toggle')) {
+      layer.enabled = e.target.checked;
+      drawDomainPreview(true);
+      return;
+    }
+    if (e.target.classList.contains('l-del')) {
+      DOM.layers = DOM.layers.filter((l) => l.id !== id);
+      if (DOM.selLayerId === id) DOM.selLayerId = DOM.layers[0]?.id || null;
+      renderLayerList();
+      renderLayerEditor();
+      drawDomainPreview(true);
+      return;
+    }
+    DOM.selLayerId = id;
+    renderLayerList();
+    renderLayerEditor();
+    drawDomainPreview(true);
+  });
+
+  const syncLayerFromForm = (rerenderEditor = false) => {
+    const l = getSelectedLayer();
+    if (!l) return;
+    const host = $('#domLayerEditor');
+    l.tpl = $('#leTpl', host)?.value ?? l.tpl;
+    l.font = $('#leFont', host)?.value || l.font;
+    l.weight = $('#leWeight', host)?.value || l.weight;
+    l.size = +$('#leSize', host)?.value || l.size;
+    l.color = $('#leColor', host)?.value || l.color;
+    l.align = $('#leAlign', host)?.value || l.align;
+    l.angle = +$('#leAngle', host)?.value || 0;
+    l.x = +$('#leX', host)?.value || 0;
+    l.y = +$('#leY', host)?.value || 0;
+    l.shadow = $('#leShadow', host)?.checked ?? l.shadow;
+    l.stroke = $('#leStroke', host)?.checked ?? l.stroke;
+    l.pill = $('#lePill', host)?.checked ?? l.pill;
+    if ($('#leStrokeColor', host)) l.strokeColor = $('#leStrokeColor', host).value;
+    if ($('#leStrokeWidth', host)) l.strokeWidth = +$('#leStrokeWidth', host).value || 4;
+    if ($('#lePillC1', host)) l.pillColor1 = $('#lePillC1', host).value;
+    if ($('#lePillC2', host)) l.pillColor2 = $('#lePillC2', host).value;
+    if ($('#lePillRad', host)) l.pillRadius = +$('#lePillRad', host).value || 0;
+    if ($('#lePillPad', host)) { l.pillPadX = +$('#lePillPad', host).value || 10; l.pillPadY = Math.round(l.pillPadX * 0.48); }
+    renderLayerList();
+    if (rerenderEditor) renderLayerEditor();
+    drawDomainPreview(true);
+  };
+
+  $('#domLayerEditor').addEventListener('input', (e) => {
+    if (['leShadow', 'leStroke', 'lePill'].includes(e.target.id)) return;
+    syncLayerFromForm(false);
+  });
+  $('#domLayerEditor').addEventListener('change', (e) => {
+    syncLayerFromForm(['leShadow', 'leStroke', 'lePill'].includes(e.target.id));
+  });
+  $('#domLayerEditor').addEventListener('click', (e) => {
+    const sw = e.target.closest('[data-sw]');
+    if (sw) {
+      const l = getSelectedLayer();
+      if (l) { l.color = sw.dataset.sw; renderLayerEditor(); renderLayerList(); drawDomainPreview(true); }
+    }
+    if (e.target.id === 'btnLePickColor') setDomMode('pick');
+    if (e.target.id === 'lnkInsertNo') {
+      const inp = $('#leTpl');
+      if (inp) { inp.value += '{no}'; syncLayerFromForm(false); inp.focus(); }
+    }
+  });
+
+  // Tuval üzerinde fare etkileşimleri (Sürükle-Taşı, Kutu Çizerek Eski Yazıyı Sil, Renk Seç)
+  const cv = $('#domainCanvas');
+  cv.addEventListener('pointerdown', (e) => {
+    const pt = canvasCoords(e);
+    if (DOM.mode === 'pick') {
+      const ctx = DOM.cleanCanvas.getContext('2d');
+      const px = ctx.getImageData(Math.round(pt.x), Math.round(pt.y), 1, 1).data;
+      const hex = '#' + [px[0], px[1], px[2]].map((v) => v.toString(16).padStart(2, '0')).join('');
+      const l = getSelectedLayer();
+      if (l) { l.color = hex; renderLayerEditor(); renderLayerList(); }
+      setDomMode('move');
+      drawDomainPreview(true);
+      toast(`🎯 Renk seçildi: ${hex}`, 'ok');
+      return;
+    }
+    if (DOM.mode === 'erase') {
+      cv.setPointerCapture(e.pointerId);
+      DOM.drag = { type: 'erase', sx: pt.x, sy: pt.y, cx: pt.x, cy: pt.y };
+      return;
+    }
+    // 'move' modu: tıklanan yazı katmanını bul veya seçili katmanı sürükle
+    let hit = null;
+    for (let i = DOM.layers.length - 1; i >= 0; i--) {
+      const l = DOM.layers[i];
+      if (l.enabled === false || !l._bbox) continue;
+      const b = l._bbox;
+      if (pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h) { hit = l; break; }
+    }
+    if (hit && hit.id !== DOM.selLayerId) {
+      DOM.selLayerId = hit.id;
+      renderLayerList();
+      renderLayerEditor();
+    }
+    const active = hit || getSelectedLayer();
+    if (active) {
+      cv.setPointerCapture(e.pointerId);
+      DOM.drag = { type: 'layer', layer: active, ox: pt.x - active.x, oy: pt.y - active.y };
+      cv.style.cursor = 'grabbing';
+      drawDomainPreview(true);
+    }
+  });
+
+  cv.addEventListener('pointermove', (e) => {
+    if (!DOM.drag) return;
+    const pt = canvasCoords(e);
+    if (DOM.drag.type === 'layer') {
+      DOM.drag.layer.x = Math.round(pt.x - DOM.drag.ox);
+      DOM.drag.layer.y = Math.round(pt.y - DOM.drag.oy);
+      const xIn = $('#leX'); const yIn = $('#leY');
+      if (xIn) xIn.value = DOM.drag.layer.x;
+      if (yIn) yIn.value = DOM.drag.layer.y;
+      drawDomainPreview(true);
+    } else if (DOM.drag.type === 'erase') {
+      DOM.drag.cx = pt.x;
+      DOM.drag.cy = pt.y;
+      drawDomainPreview(true);
+    }
+  });
+
+  cv.addEventListener('pointerup', () => {
+    if (!DOM.drag) return;
+    if (DOM.drag.type === 'erase') {
+      const r = normRect(DOM.drag.sx, DOM.drag.sy, DOM.drag.cx, DOM.drag.cy);
+      DOM.drag = null;
+      if (r.w > 6 && r.h > 6) {
+        // Kutunun en-boy oranına göre en uygun silgi modunu otomatik seç (yatay buton içi ise vertical, geniş açık alan ise laplace)
+        const autoMode = r.w > r.h * 2.1 ? 'vertical' : DOM.eraseMode;
+        DOM.eraseMode = autoMode;
+        DOM.patches.push({ ...r, mode: autoMode, color: DOM.eraseColor });
+        rebuildCleanCanvas();
+
+        // Yeni yüklenen bir görselde ilk silgi kutusu çizildiyse, aktif yazıyı otomatik olarak silinen kutunun tam ortasına yerleştir ve kontrast rengini ayarla!
+        const l = getSelectedLayer();
+        if (l && DOM.isFreshUpload && DOM.patches.length === 1) {
+          const cx = Math.round(r.x + r.w / 2);
+          const cy = Math.round(r.y + r.h / 2);
+          l.x = cx;
+          l.y = cy;
+          l.align = 'center';
+          l.size = Math.max(18, Math.min(200, Math.round(r.h * 0.68)));
+          const px = DOM.cleanCanvas.getContext('2d').getImageData(cx, cy, 1, 1).data;
+          const lum = px[0] * 0.299 + px[1] * 0.587 + px[2] * 0.114;
+          l.color = lum > 135 ? '#060a08' : '#ffffff';
+          l.shadow = lum <= 135;
+          DOM.isFreshUpload = false;
+          setDomMode('move');
+          renderLayerList();
+          renderLayerEditor();
+          toast('✨ Eski yazı temizlendi ve yeni yazı otomatik olarak yerine yerleştirildi!', 'ok');
+        }
+        renderEraseBar();
+        drawDomainPreview(true);
+      }
+      return;
+    }
+    DOM.drag = null;
+    cv.style.cursor = DOM.mode === 'move' ? 'grab' : 'crosshair';
+    drawDomainPreview(true);
+  });
+
+  // Yeni özel görsel yükleme
   $('#btnDomCustomTpl').onclick = () => $('#domTplFile').click();
   $('#domTplFile').onchange = (e) => {
     const f = e.target.files[0];
     e.target.value = '';
-    if (f) loadDomainTemplate(URL.createObjectURL(f));
+    if (!f) return;
+    DOM.uploadedFile = f;
+    DOM.activeTplId = 'custom_' + Date.now();
+    DOM.tplName = f.name.replace(/\.[^.]+$/, '');
+    DOM.patches = [];
+    DOM.isFreshUpload = true;
+    renderDomainTplBar();
+    const url = URL.createObjectURL(f);
+    const im = new Image();
+    im.onload = () => {
+      DOM.img = im;
+      const w = im.naturalWidth || 1080;
+      const h = im.naturalHeight || 1080;
+      DOM.layers = [{
+        id: 'l1', enabled: true, tpl: '{no}',
+        x: Math.round(w / 2), y: Math.round(h / 2),
+        font: 'Poppins', weight: '800', size: Math.round(Math.min(w, h) * 0.065),
+        color: '#ffffff', align: 'center', angle: 0,
+        shadow: false, shadowColor: '#000000', shadowBlur: 12,
+        stroke: false, strokeColor: '#000000', strokeWidth: 4,
+        pill: false, pillColor1: '#ff7a1a', pillColor2: '#ff2a12', pillPadX: 26, pillPadY: 12, pillRadius: 16,
+      }];
+      DOM.selLayerId = 'l1';
+      rebuildCleanCanvas();
+      setDomMode('erase');
+      renderLayerList();
+      renderLayerEditor();
+      drawDomainPreview(true);
+      toast('🧽 Görsel yüklendi! Görseldeki eski yazının/adresin üzerine fareyle kutu çizerek temizleyin.', 'ok', 6500);
+    };
+    im.src = url;
   };
+
+  // Şablon olarak kaydetme
+  $('#btnDomSaveTpl').onclick = async () => {
+    if (!S.me.canEdit) { toast('⚠ Şablon kaydetmek için düzenleme yetkisi gerekir.', 'err'); return; }
+    const name = await askText({
+      title: '💾 Tasarımı Şablon Olarak Kaydet',
+      label: 'Şablon Adı (tüm ekip bu şablonu tek tıkla kullanabilir)',
+      value: DOM.tplName === 'Betorspin Kare Domain' ? '' : DOM.tplName,
+      placeholder: 'ör. Baywin Domain veya Story Domain',
+      ok: 'Şablonu Kaydet',
+    });
+    if (!name) return;
+    const form = new FormData();
+    if (DOM.uploadedFile) form.append('bg', DOM.uploadedFile, DOM.uploadedFile.name);
+    form.append('template', JSON.stringify({
+      id: DOM.activeTplId,
+      name,
+      bgUrl: DOM.bgUrl,
+      width: DOM.img?.naturalWidth || 1080,
+      height: DOM.img?.naturalHeight || 1080,
+      patches: DOM.patches,
+      layers: DOM.layers,
+    }));
+    const res = await act(() => api('/api/templates', { method: 'POST', form }), `✅ “${esc(name)}” şablonu kaydedildi`);
+    if (res && res.template) {
+      await loadState();
+      selectTemplate(res.template);
+    }
+  };
+
   $('#btnDomSingleDl').onclick = async () => {
     const list = parseDomainNumbers($('#domInput').value);
-    renderDomainToCanvas(list[0]);
+    renderDomainToCanvas(list[0], false);
     const blob = await new Promise((r) => $('#domainCanvas').toBlob(r, 'image/png'));
+    drawDomainPreview(true);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `${list[0]}.png`;
@@ -1588,8 +2295,9 @@ function initDomainTool() {
   $('#btnDomCopy').onclick = async () => {
     try {
       const list = parseDomainNumbers($('#domInput').value);
-      renderDomainToCanvas(list[0]);
+      renderDomainToCanvas(list[0], false);
       const blob = await new Promise((r) => $('#domainCanvas').toBlob(r, 'image/png'));
+      drawDomainPreview(true);
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
       toast(`📋 ${list[0]}.png panoya kopyalandı`, 'ok');
     } catch { toast('⚠ Panoya kopyalanamadı', 'err'); }
@@ -1603,65 +2311,25 @@ function loadDomainTemplate(src) {
   im.crossOrigin = 'anonymous';
   im.onload = () => {
     DOM.img = im;
-    if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawDomainPreview);
-    else drawDomainPreview();
+    rebuildCleanCanvas();
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => drawDomainPreview(true));
+    else drawDomainPreview(true);
   };
   im.src = src;
 }
 
-function renderDomainToCanvas(numStr) {
-  const cv = $('#domainCanvas');
-  const ctx = cv.getContext('2d');
-  if (DOM.img) {
-    cv.width = DOM.img.naturalWidth || 1080;
-    cv.height = DOM.img.naturalHeight || 1080;
-    ctx.drawImage(DOM.img, 0, 0);
-  } else {
-    ctx.fillStyle = '#140c08';
-    ctx.fillRect(0, 0, cv.width, cv.height);
-  }
-
-  const bigSize = +$('#domBigSize').value || 202;
-  const urlSize = +$('#domUrlSize').value || 29;
-  const bigX = +$('#domBigX').value || 50;
-  const bigY = +$('#domBigY').value || 316;
-  const urlX = +$('#domUrlX').value || 227;
-  const urlY = +$('#domUrlY').value || 681;
-  const urlTpl = $('#domUrlTpl').value || 'www.{no}betorspin.com';
-  const urlText = urlTpl.replace(/\{no\}/gi, numStr);
-
-  // 1. Büyük Rakam
-  ctx.save();
-  ctx.font = `700 ${bigSize}px "Poppins", sans-serif`;
-  ctx.fillStyle = '#ffffff';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'alphabetic';
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
-  ctx.shadowBlur = 14;
-  ctx.shadowOffsetY = 4;
-  ctx.fillText(numStr, bigX, bigY);
-  ctx.restore();
-
-  // 2. Alt Buton URL
-  ctx.save();
-  ctx.font = `500 ${urlSize}px "Poppins", sans-serif`;
-  ctx.fillStyle = '#ffffff';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(urlText, urlX, urlY);
-  ctx.restore();
-}
-
-function drawDomainPreview() {
-  const list = parseDomainNumbers($('#domInput').value);
+function drawDomainPreview(showGuides = true) {
+  const list = parseDomainNumbers($('#domInput')?.value);
   const first = list[0];
-  $('#domPreviewLabel').textContent = `${first}.png`;
-  $('#domCountInfo').innerHTML = list.length === 1
-    ? `<b>1</b> adet görsel üretilecek (<b>${esc(first)}.png</b>)`
-    : `Toplam <b>${list.length}</b> adet görsel üretilecek (<b>${esc(first)}.png</b> … <b>${esc(list[list.length - 1])}.png</b>)`;
-  $('#btnDomBatchZip').textContent = list.length === 1 ? `⬇ ${first}.png İndir` : `📦 ${list.length} Görseli Üret & ZIP İndir`;
-  $('#btnDomSaveCat').textContent = list.length === 1 ? `📥 ${first}.png Kataloğa Kaydet` : `📥 ${list.length} Görseli Kataloğa Kaydet`;
-  renderDomainToCanvas(first);
+  if ($('#domPreviewLabel')) $('#domPreviewLabel').textContent = `${first}.png`;
+  if ($('#domCountInfo')) {
+    $('#domCountInfo').innerHTML = list.length === 1
+      ? `<b>1</b> adet görsel üretilecek (<b>${esc(first)}.png</b>)`
+      : `Toplam <b>${list.length}</b> adet görsel üretilecek (<b>${esc(first)}.png</b> … <b>${esc(list[list.length - 1])}.png</b>)`;
+  }
+  if ($('#btnDomBatchZip')) $('#btnDomBatchZip').textContent = list.length === 1 ? `⬇ ${first}.png İndir` : `📦 ${list.length} Görseli Üret & ZIP İndir`;
+  if ($('#btnDomSaveCat')) $('#btnDomSaveCat').textContent = list.length === 1 ? `📥 ${first}.png Kataloğa Kaydet` : `📥 ${list.length} Görseli Kataloğa Kaydet`;
+  renderDomainToCanvas(first, showGuides);
 }
 
 async function runDomainBatch(mode) {
@@ -1675,7 +2343,7 @@ async function runDomainBatch(mode) {
     if (!S.me.canEdit) { toast('⚠ Kataloğa kaydetmek için düzenleme yetkisi gerekir.', 'err'); return; }
     const domCat = S.cats.find((c) => c.name.toLowerCase().includes('domain'));
     const pick = await pickCategory({
-      title: `${list.length} Domain Görselini Kataloğa Kaydet`,
+      title: `${list.length} Görseli Kataloğa Kaydet`,
       selected: domCat ? domCat.id : S.cur,
       ok: 'Üret & Kaydet',
     });
@@ -1694,7 +2362,7 @@ async function runDomainBatch(mode) {
     const blobs = [];
     for (let i = 0; i < list.length; i++) {
       const no = list[i];
-      renderDomainToCanvas(no);
+      renderDomainToCanvas(no, false);
       const blob = await new Promise((r) => $('#domainCanvas').toBlob(r, 'image/png'));
       blobs.push({ name: `${no}.png`, blob });
       $('div', bar).style.width = Math.round(((i + 1) / list.length) * 50) + '%';
@@ -1714,10 +2382,9 @@ async function runDomainBatch(mode) {
         added += res.added;
         $('div', bar).style.width = (50 + Math.round(((i + chunk.length) / blobs.length) * 50)) + '%';
       }
-      toast(`✅ ${added} domain görseli kataloğa kaydedildi`, 'ok');
+      toast(`✅ ${added} görsel kataloğa kaydedildi`, 'ok');
       await loadState();
     } else {
-      // Sıkıştırıp ZIP olarak indir
       const toolIds = [];
       const batchSize = 8;
       for (let i = 0; i < blobs.length; i += batchSize) {
@@ -1732,14 +2399,14 @@ async function runDomainBatch(mode) {
       }
       if (toolIds.length) {
         location.href = '/api/tools/zip?ids=' + toolIds.join(',');
-        toast(`📦 ${toolIds.length} domain görseli ZIP olarak indiriliyor`, 'ok');
+        toast(`📦 ${toolIds.length} görsel ZIP olarak indiriliyor`, 'ok');
       }
     }
   } catch (e) {
     toast('⚠ ' + esc(e.message), 'err');
   } finally {
     S.busy--;
-    drawDomainPreview();
+    drawDomainPreview(true);
     $('#btnDomBatchZip').disabled = false;
     $('#btnDomSaveCat').disabled = false;
     setTimeout(() => { bar.hidden = true; }, 600);

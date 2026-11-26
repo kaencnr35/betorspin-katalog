@@ -29,9 +29,10 @@ const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : pat
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const THUMB_DIR = path.join(DATA_DIR, 'thumbs');
 const AVATAR_DIR = path.join(DATA_DIR, 'avatars');
+const TPL_DIR = path.join(DATA_DIR, 'templates');
 const TMP_DIR = path.join(DATA_DIR, 'tmp');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
-[UPLOAD_DIR, THUMB_DIR, AVATAR_DIR, TMP_DIR].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+[UPLOAD_DIR, THUMB_DIR, AVATAR_DIR, TPL_DIR, TMP_DIR].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
 sharp.cache(false);
 
@@ -50,8 +51,36 @@ let db = {
   bans: [],
   // trash: { ...imageRecord, origCategoryName, deletedBy, deletedAt }
   trash: [],
+  // templates: { id, name, bgUrl, width, height, patches:[], layers:[], createdBy, createdAt }
+  templates: [],
   // logs: { id, ts, actorId, actorName, actorAvatar, actorRole, action, detail, severity:'info'|'warn'|'security' }
   logs: [],
+};
+
+const DEFAULT_BETORSPIN_TPL = {
+  id: 'default-betorspin-domain',
+  name: 'Betorspin Kare Domain',
+  bgUrl: '/domain-template.png',
+  width: 1080,
+  height: 1080,
+  builtin: true,
+  patches: [],
+  layers: [
+    {
+      id: 'l1', enabled: true, tpl: '{no}', x: 50, y: 245,
+      font: 'Poppins', weight: '700', size: 202, color: '#ffffff', align: 'left', angle: 0,
+      shadow: true, shadowColor: '#000000', shadowBlur: 14,
+      stroke: false, strokeColor: '#000000', strokeWidth: 4,
+      pill: false, pillColor1: '#ff7a1a', pillColor2: '#ff2a12', pillPadX: 24, pillPadY: 12, pillRadius: 14,
+    },
+    {
+      id: 'l2', enabled: true, tpl: 'www.{no}betorspin.com', x: 227, y: 681,
+      font: 'Poppins', weight: '500', size: 29, color: '#ffffff', align: 'center', angle: 0,
+      shadow: false, shadowColor: '#000000', shadowBlur: 8,
+      stroke: false, strokeColor: '#000000', strokeWidth: 2,
+      pill: false, pillColor1: '#ff7a1a', pillColor2: '#ff2a12', pillPadX: 24, pillPadY: 12, pillRadius: 14,
+    },
+  ],
 };
 
 function loadDbFromDisk() {
@@ -64,6 +93,7 @@ function loadDbFromDisk() {
       // Eski IP banlarını temizle (aynı IP'den çalışıldığı için IP engeli kullanılmaz)
       db.bans = (db.bans || []).filter((b) => b.type !== 'ip');
       db.trash = db.trash || [];
+      db.templates = db.templates || [];
       db.logs = db.logs || [];
       delete db.ipRules;
     } catch (e) {
@@ -629,6 +659,7 @@ function clearFailedAttempts(key) {
 app.use('/files', express.static(UPLOAD_DIR, { maxAge: '365d', immutable: true, dotfiles: 'allow' }));
 app.use('/thumbs', express.static(THUMB_DIR, { maxAge: '365d', immutable: true, dotfiles: 'allow' }));
 app.use('/avatars', express.static(AVATAR_DIR, { maxAge: '7d', dotfiles: 'allow' }));
+app.use('/templates', express.static(TPL_DIR, { maxAge: '30d', dotfiles: 'allow' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 /* ---- Genel Durum, Senkron & Profil ---- */
@@ -656,13 +687,80 @@ app.get('/api/rev', (req, res) => {
 });
 
 app.get('/api/state', (req, res) => {
+  const tpls = [DEFAULT_BETORSPIN_TPL, ...(db.templates || []).filter((t) => t.id !== DEFAULT_BETORSPIN_TPL.id)];
   res.json({
     rev: db.rev,
     me: publicMe(req.auth),
     presence: getPublicPresence(req.auth.sid),
     categories: db.categories,
     images: db.images,
+    templates: tpls,
   });
+});
+
+/* ---- Tasarım & Domain Şablonları ---- */
+app.post('/api/templates', requireEdit, avatarUpload.single('bg'), async (req, res) => {
+  const f = req.file;
+  try {
+    const data = JSON.parse(req.body.template || '{}');
+    const name = sanitize(data.name || 'Yeni Şablon', 60);
+    if (!name) return res.status(400).json({ error: 'Şablon adı gerekli.' });
+    const id = data.id && data.id !== DEFAULT_BETORSPIN_TPL.id && db.templates.some((t) => t.id === data.id) ? data.id : uid();
+    let existing = db.templates.find((t) => t.id === id);
+    let bgUrl = existing ? existing.bgUrl : (data.bgUrl || '/domain-template.png');
+    let width = existing ? existing.width : (Number(data.width) || 1080);
+    let height = existing ? existing.height : (Number(data.height) || 1080);
+
+    if (f) {
+      const buf = await fsp.readFile(f.path);
+      const m = await sharp(buf, { limitInputPixels: false }).metadata();
+      width = (m.orientation || 1) >= 5 ? m.height : m.width;
+      height = (m.orientation || 1) >= 5 ? m.width : m.height;
+      const outPath = path.join(TPL_DIR, `${id}.png`);
+      await sharp(buf, { limitInputPixels: false }).rotate().png({ compressionLevel: 9 }).toFile(outPath);
+      cloud.syncFileUp(outPath, `templates/${id}.png`);
+      bgUrl = `/templates/${id}.png?v=${Date.now()}`;
+    }
+
+    const tplObj = {
+      id,
+      name,
+      bgUrl,
+      width,
+      height,
+      patches: Array.isArray(data.patches) ? data.patches.slice(0, 30) : [],
+      layers: Array.isArray(data.layers) ? data.layers.slice(0, 20) : [],
+      createdBy: req.auth.name || 'Yetkili',
+      createdAt: Date.now(),
+    };
+
+    if (existing) {
+      Object.assign(existing, tplObj);
+      addLog(req, 'Şablon Güncelleme', `“${name}” tasarım şablonunu güncelledi`);
+    } else {
+      db.templates.push(tplObj);
+      addLog(req, 'Şablon Kaydetme', `“${name}” adlı yeni tasarım şablonu oluşturdu`);
+    }
+    save();
+    res.json({ ok: true, template: tplObj });
+  } catch (e) {
+    res.status(400).json({ error: e.message || 'Şablon kaydedilemedi.' });
+  } finally {
+    if (f) await safeUnlink(f.path);
+  }
+});
+
+app.delete('/api/templates/:id', requireEdit, async (req, res) => {
+  const id = req.params.id;
+  if (id === DEFAULT_BETORSPIN_TPL.id) return res.status(400).json({ error: 'Varsayılan şablon silinemez.' });
+  const t = db.templates.find((x) => x.id === id);
+  if (!t) return res.status(404).json({ error: 'Şablon bulunamadı.' });
+  await safeUnlink(path.join(TPL_DIR, `${id}.png`));
+  cloud.syncFileDel(`templates/${id}.png`);
+  db.templates = db.templates.filter((x) => x.id !== id);
+  addLog(req, 'Şablon Silme', `“${t.name}” tasarım şablonunu sildi`);
+  save();
+  res.json({ ok: true });
 });
 
 /* ---- Kimlik Doğrulama & Kendi Profilini Düzenleme ---- */

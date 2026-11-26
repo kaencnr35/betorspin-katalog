@@ -161,13 +161,36 @@ h2 { margin: 0 0 4px; font-size: 24px; font-weight: 700; }
   border: 1px solid rgba(255,255,255,.18); display: grid; place-items: center; font-size: 13px; color: #fff; backdrop-filter: blur(4px); }
 .card-actions .ca-btn:hover { background: var(--grad); border-color: transparent; transform: scale(1.06); }
 
-/* ---- Otomatik Domain Üretici ---- */
-.domain-layout { display: grid; grid-template-columns: 1fr 410px; gap: 20px; align-items: start; margin-top: 16px; }
+/* ---- Otomatik Domain & Genel Tasarım Üretici ---- */
+.tpl-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+.tpl-chip { display: inline-flex; align-items: center; gap: 8px; padding: 7px 13px; border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--line); cursor: pointer; font-weight: 600; font-size: 13px; transition: .15s; }
+.tpl-chip:hover { border-color: var(--accent-line); background: var(--panel2); }
+.tpl-chip.active { background: var(--accent-soft); border-color: var(--o1); color: #ffb48a; }
+.tpl-chip .del { color: var(--muted); font-size: 13px; padding: 0 3px; border-radius: 4px; }
+.tpl-chip .del:hover { color: var(--danger); background: rgba(255,77,94,.15); }
+
+.domain-layout { display: grid; grid-template-columns: 1fr 430px; gap: 20px; align-items: start; margin-top: 8px; }
 .domain-preview-card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
-.dp-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); font-weight: 600; flex-wrap: wrap; }
+.dp-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); font-weight: 600; flex-wrap: wrap; }
+#domToolModes button.active { background: var(--grad); border-color: transparent; color: #fff; }
+.dp-subbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 14px; background: #141419; border-bottom: 1px solid var(--line); font-size: 12px; }
 .dp-stage { padding: 16px; display: grid; place-items: center;
   background: conic-gradient(#16161a 25%, #101013 0 50%, #16161a 0 75%, #101013 0) 0 0 / 20px 20px; }
-#domainCanvas { width: min(100%, 540px); height: auto; aspect-ratio: 1 / 1; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.7); display: block; }
+.dp-foot { padding: 10px 14px; border-top: 1px solid var(--line); background: #09090b; }
+#domainCanvas { width: min(100%, 580px); height: auto; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.7); display: block; touch-action: none; user-select: none; }
+
+.layer-list { display: grid; gap: 6px; margin-bottom: 10px; }
+.layer-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 9px;
+  background: #0a0a0d; border: 1px solid var(--line); cursor: pointer; transition: .12s; }
+.layer-item:hover { border-color: #3a3a45; }
+.layer-item.active { border-color: var(--o1); background: rgba(255, 90, 26, .12); }
+.layer-item .l-txt { flex: 1; font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layer-item .l-sw { width: 14px; height: 14px; border-radius: 4px; border: 1px solid rgba(255,255,255,.35); flex: none; }
+.layer-editor { border-top: 1px solid var(--line); padding-top: 10px; }
+.swatches { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.swatch { width: 24px; height: 24px; border-radius: 6px; border: 1px solid rgba(255,255,255,.3); cursor: pointer; padding: 0; }
+.swatch:hover { transform: scale(1.12); border-color: #fff; }
 .empty { text-align: center; color: var(--muted); padding: 60px 20px; border: 2px dashed var(--line); border-radius: 16px; margin-top: 20px; }
 .drop-hint { position: fixed; inset: 84px 0 0 280px; background: rgba(255, 70, 20, .14); border: 3px dashed var(--o1);
   display: grid; place-items: center; font-size: 24px; font-weight: 700; z-index: 40; pointer-events: none; }

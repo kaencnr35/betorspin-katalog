@@ -8,8 +8,8 @@
   <link rel="icon" type="image/png" sizes="192x192" href="favicon-192.png?v=3">
   <link rel="apple-touch-icon" href="favicon-192.png?v=3">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=6">
+  <link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Montserrat:wght@500;600;700;800;900&family=Oswald:wght@500;600;700&family=Poppins:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css?v=7">
 </head>
 <body>
   <div id="app">
@@ -44,7 +44,7 @@
     <aside id="sidebar">
       <nav class="tabs">
         <a href="#/" id="tabCatalog" class="tab active">📁 Katalog</a>
-        <a href="#/domain" id="tabDomain" class="tab">🌐 Domain Üretici</a>
+        <a href="#/domain" id="tabDomain" class="tab">🎨 Tasarım &amp; Domain Üretici</a>
         <a href="#/tools" id="tabTools" class="tab">⚡ Sıkıştır &amp; Boyutlandır</a>
         <a href="#/admin" id="tabAdmin" class="tab admin-tab" hidden>🛡️ Admin Paneli</a>
       </nav>
@@ -84,61 +84,65 @@
         <div id="dropHint" class="drop-hint" hidden>Görselleri veya klasörleri buraya bırak</div>
       </section>
 
-      <!-- OTOMATİK DOMAİN / RAKAM ÜRETİCİ -->
+      <!-- GENEL TASARIM & DOMAİN ÜRETİCİ -->
       <section id="viewDomain" hidden>
-        <h2>🌐 Otomatik Domain Görseli Üretici</h2>
-        <p class="muted">Tek bir domain numarası (ör. <b>801</b>) veya aralık (ör. <b>801-820</b>) girin; tasarım ve font bozulmadan anında üretin, indirin veya doğrudan kataloğa kaydedin.</p>
+        <div class="admin-head">
+          <div>
+            <h2>🎨 Genel Tasarım &amp; Otomatik Domain Üretici</h2>
+            <p class="muted" style="margin:2px 0 0">İstediğiniz görseli yükleyin, üzerindeki eski yazıyı <b>🧽 Eski Yazıyı Sil</b> aracıyla kutu çizerek temizleyin, yeni yazı katmanlarını fareyle sürükleyip yerleştirin ve toplu üretim yapın.</p>
+          </div>
+          <div class="row-btns">
+            <button type="button" id="btnDomCustomTpl">📂 Yeni Görsel Yükle…</button>
+            <button type="button" id="btnDomSaveTpl" class="primary edit-only">💾 Şablon Olarak Kaydet</button>
+          </div>
+          <input type="file" id="domTplFile" accept="image/png,image/jpeg,image/webp" hidden>
+        </div>
+
+        <!-- Kayıtlı Şablonlar Çubuğu -->
+        <div id="domTplBar" class="tpl-bar"></div>
+
         <div class="domain-layout">
           <div class="domain-preview-card">
             <div class="dp-head">
-              <span>Canlı Önizleme (<span id="domPreviewLabel">801.png</span>)</span>
+              <div class="row-btns" id="domToolModes">
+                <button type="button" data-dmode="move" class="mini active" style="font-size:12px;padding:5px 11px" title="Yazıları fareyle tutup sürükleyin">✋ Yazıyı Taşı &amp; Seç</button>
+                <button type="button" data-dmode="erase" class="mini" style="font-size:12px;padding:5px 11px" title="Görseldeki eski yazının üzerine dikdörtgen çizerek silin">🧽 Eski Yazıyı Sil (Kutu Çiz)</button>
+                <button type="button" data-dmode="pick" class="mini" style="font-size:12px;padding:5px 11px" title="Görselden yazı rengi seçin">🎯 Renk Seçici</button>
+              </div>
               <div class="row-btns">
-                <button id="btnDomCopy" class="mini" style="font-size:12px;padding:4px 10px">📋 Panoya Kopyala</button>
-                <button id="btnDomSingleDl" class="primary mini" style="font-size:12px;padding:4px 12px">⬇ Bu Görseli İndir</button>
+                <button id="btnDomCopy" class="mini" style="font-size:12px;padding:4px 10px">📋 Kopyala</button>
+                <button id="btnDomSingleDl" class="primary mini" style="font-size:12px;padding:4px 12px">⬇ İndir (<span id="domPreviewLabel">801.png</span>)</button>
               </div>
             </div>
+            <div id="domEraseBar" class="dp-subbar" hidden></div>
             <div class="dp-stage">
               <canvas id="domainCanvas" width="1080" height="1080"></canvas>
+            </div>
+            <div class="dp-foot muted small">
+              💡 <b>İpucu:</b> Yazıları görselin üzerinde fareyle tutup istediğiniz yere sürükleyebilirsiniz. Yüklü görselde eski bir yazı/adres varsa <b>“🧽 Eski Yazıyı Sil”</b> butonuna basıp o yazının üzerine kutu çizin.
             </div>
           </div>
 
           <div class="panel">
             <div class="opt-block on">
-              <div class="hd">🔢 Domain Numarası veya Aralık</div>
+              <div class="hd">🔢 Üretilecek Numara / Metin / Aralık (<code>{no}</code>)</div>
               <div class="bd">
-                <div class="field">
-                  <label>Tek numara (ör. 801), aralık (ör. 801-820) veya virgüllü (801, 802, 805)</label>
+                <div class="field" style="margin-top:0">
+                  <label>Tek değer (ör. 801), aralık (ör. 801-820) veya virgüllü (801, 802, 805)</label>
                   <input type="text" id="domInput" value="801" placeholder="ör. 801 veya 801-820" style="width:100%;font-size:16px;font-weight:700">
-                </div>
-                <div class="field">
-                  <label>Alt Buton Adres Kalıbı (<code>{no}</code> yerine rakam yazılır)</label>
-                  <input type="text" id="domUrlTpl" value="www.{no}betorspin.com" style="width:100%">
                 </div>
                 <div id="domCountInfo" class="dim-hint">1 adet görsel üretilecek (801.png)</div>
               </div>
             </div>
 
-            <div class="opt-block">
-              <div class="hd">🎨 Şablon &amp; Konum İnce Ayarı</div>
+            <div class="opt-block on">
+              <div class="hd" style="justify-content:space-between">
+                <span>📝 Yazı Katmanları</span>
+                <button type="button" id="btnDomAddLayer" class="mini primary" style="font-size:12px;padding:2px 10px">＋ Yazı Ekle</button>
+              </div>
               <div class="bd">
-                <div class="field">
-                  <label>Arka Plan Şablonu</label>
-                  <div class="row-btns">
-                    <button type="button" id="btnDomDefaultTpl" class="mini" style="font-size:12px;padding:4px 10px">Varsayılan Betorspin Şablonu</button>
-                    <button type="button" id="btnDomCustomTpl" class="mini" style="font-size:12px;padding:4px 10px">📂 Özel Şablon Yükle…</button>
-                  </div>
-                  <input type="file" id="domTplFile" accept="image/png,image/jpeg,image/webp" hidden>
-                </div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-                  <div class="field" style="margin:0"><label>Büyük Rakam Boyutu (px)</label><input type="number" id="domBigSize" value="202" min="40" max="400" style="width:100%"></div>
-                  <div class="field" style="margin:0"><label>Adres Yazı Boyutu (px)</label><input type="number" id="domUrlSize" value="29" min="12" max="100" style="width:100%"></div>
-                  <div class="field" style="margin:0"><label>Büyük Rakam X / Y</label>
-                    <div class="inline"><input type="number" id="domBigX" value="50" style="width:50%"><input type="number" id="domBigY" value="316" style="width:50%"></div>
-                  </div>
-                  <div class="field" style="margin:0"><label>Adres Kutusu Merkez X / Y</label>
-                    <div class="inline"><input type="number" id="domUrlX" value="227" style="width:50%"><input type="number" id="domUrlY" value="681" style="width:50%"></div>
-                  </div>
-                </div>
+                <div id="domLayerList" class="layer-list"></div>
+                <div id="domLayerEditor" class="layer-editor"></div>
               </div>
             </div>
 
@@ -201,6 +205,6 @@
   <input id="avatarInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
   <div id="modalRoot"></div>
   <div id="toasts"></div>
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>
