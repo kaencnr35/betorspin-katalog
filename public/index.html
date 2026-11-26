@@ -9,7 +9,7 @@
   <link rel="apple-touch-icon" href="favicon-192.png?v=3">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=4">
+  <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
   <div id="app">
@@ -44,6 +44,7 @@
     <aside id="sidebar">
       <nav class="tabs">
         <a href="#/" id="tabCatalog" class="tab active">📁 Katalog</a>
+        <a href="#/domain" id="tabDomain" class="tab">🌐 Domain Üretici</a>
         <a href="#/tools" id="tabTools" class="tab">⚡ Sıkıştır &amp; Boyutlandır</a>
         <a href="#/admin" id="tabAdmin" class="tab admin-tab" hidden>🛡️ Admin Paneli</a>
       </nav>
@@ -83,6 +84,71 @@
         <div id="dropHint" class="drop-hint" hidden>Görselleri veya klasörleri buraya bırak</div>
       </section>
 
+      <!-- OTOMATİK DOMAİN / RAKAM ÜRETİCİ -->
+      <section id="viewDomain" hidden>
+        <h2>🌐 Otomatik Domain Görseli Üretici</h2>
+        <p class="muted">Tek bir domain numarası (ör. <b>801</b>) veya aralık (ör. <b>801-820</b>) girin; tasarım ve font bozulmadan anında üretin, indirin veya doğrudan kataloğa kaydedin.</p>
+        <div class="domain-layout">
+          <div class="domain-preview-card">
+            <div class="dp-head">
+              <span>Canlı Önizleme (<span id="domPreviewLabel">801.png</span>)</span>
+              <div class="row-btns">
+                <button id="btnDomCopy" class="mini" style="font-size:12px;padding:4px 10px">📋 Panoya Kopyala</button>
+                <button id="btnDomSingleDl" class="primary mini" style="font-size:12px;padding:4px 12px">⬇ Bu Görseli İndir</button>
+              </div>
+            </div>
+            <div class="dp-stage">
+              <canvas id="domainCanvas" width="1080" height="1080"></canvas>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="opt-block on">
+              <div class="hd">🔢 Domain Numarası veya Aralık</div>
+              <div class="bd">
+                <div class="field">
+                  <label>Tek numara (ör. 801), aralık (ör. 801-820) veya virgüllü (801, 802, 805)</label>
+                  <input type="text" id="domInput" value="801" placeholder="ör. 801 veya 801-820" style="width:100%;font-size:16px;font-weight:700">
+                </div>
+                <div class="field">
+                  <label>Alt Buton Adres Kalıbı (<code>{no}</code> yerine rakam yazılır)</label>
+                  <input type="text" id="domUrlTpl" value="www.{no}betorspin.com" style="width:100%">
+                </div>
+                <div id="domCountInfo" class="dim-hint">1 adet görsel üretilecek (801.png)</div>
+              </div>
+            </div>
+
+            <div class="opt-block">
+              <div class="hd">🎨 Şablon &amp; Konum İnce Ayarı</div>
+              <div class="bd">
+                <div class="field">
+                  <label>Arka Plan Şablonu</label>
+                  <div class="row-btns">
+                    <button type="button" id="btnDomDefaultTpl" class="mini" style="font-size:12px;padding:4px 10px">Varsayılan Betorspin Şablonu</button>
+                    <button type="button" id="btnDomCustomTpl" class="mini" style="font-size:12px;padding:4px 10px">📂 Özel Şablon Yükle…</button>
+                  </div>
+                  <input type="file" id="domTplFile" accept="image/png,image/jpeg,image/webp" hidden>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                  <div class="field" style="margin:0"><label>Büyük Rakam Boyutu (px)</label><input type="number" id="domBigSize" value="202" min="40" max="400" style="width:100%"></div>
+                  <div class="field" style="margin:0"><label>Adres Yazı Boyutu (px)</label><input type="number" id="domUrlSize" value="29" min="12" max="100" style="width:100%"></div>
+                  <div class="field" style="margin:0"><label>Büyük Rakam X / Y</label>
+                    <div class="inline"><input type="number" id="domBigX" value="50" style="width:50%"><input type="number" id="domBigY" value="316" style="width:50%"></div>
+                  </div>
+                  <div class="field" style="margin:0"><label>Adres Kutusu Merkez X / Y</label>
+                    <div class="inline"><input type="number" id="domUrlX" value="227" style="width:50%"><input type="number" id="domUrlY" value="681" style="width:50%"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <button id="btnDomBatchZip" class="primary big">📦 Üret &amp; İndir</button>
+            <button id="btnDomSaveCat" class="big edit-only" style="margin-top:8px">📥 Üret &amp; Kataloğa Kaydet</button>
+            <div id="domProgress" class="progress" hidden><div></div></div>
+          </div>
+        </div>
+      </section>
+
       <!-- ARAÇLAR -->
       <section id="viewTools" hidden>
         <h2>⚡ Sıkıştır &amp; Boyutlandır</h2>
@@ -111,13 +177,14 @@
         <div class="admin-head">
           <div>
             <h2>🛡️ Admin &amp; Güvenlik Paneli</h2>
-            <p class="muted" style="margin:2px 0 0">Ekip profillerini oluşturun, kullanıcı adı/şifre dağıtın, tüm düzenleme geçmişini ve güvenlik duvarı kayıtlarını yönetin.</p>
+            <p class="muted" style="margin:2px 0 0">Ekip profillerini oluşturun, kullanıcı adı/şifre dağıtın, çöp kutusunu, düzenleme geçmişini ve güvenlik duvarı kayıtlarını yönetin.</p>
           </div>
           <button id="btnAdminRefresh">🔄 Yenile</button>
         </div>
         <div id="adminStats" class="admin-stats"></div>
         <div class="admin-subtabs" id="adminSubtabs">
           <button data-atab="users" class="active">👥 Profiller &amp; Hesap Oluşturma</button>
+          <button data-atab="trash">🗑️ Çöp Kutusu (Son Silinenler)</button>
           <button data-atab="logs">📜 İşlem Geçmişi (Kim Ne Yaptı)</button>
           <button data-atab="security">🛡️ Güvenlik &amp; Saldırı Kayıtları</button>
           <button data-atab="bans">🚫 Engellenenler</button>
@@ -134,6 +201,6 @@
   <input id="avatarInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
   <div id="modalRoot"></div>
   <div id="toasts"></div>
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>

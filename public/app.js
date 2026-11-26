@@ -224,6 +224,7 @@ function route() {
   const h = location.hash || '#/';
   if (S.keepQuery) S.keepQuery = false; else { S.query = ''; $('#search').value = ''; }
   if (h.startsWith('#/tools')) S.view = 'tools';
+  else if (h.startsWith('#/domain')) { S.view = 'domain'; initDomainTool(); }
   else if (h.startsWith('#/admin')) {
     if (!S.me.canAdmin) { location.hash = '#/'; return; }
     S.view = 'admin';
@@ -288,9 +289,11 @@ function render() {
   const canAdmin = S.me.canAdmin;
 
   $('#viewCatalog').hidden = S.view !== 'catalog';
+  $('#viewDomain').hidden = S.view !== 'domain';
   $('#viewTools').hidden = S.view !== 'tools';
   $('#viewAdmin').hidden = S.view !== 'admin';
   $('#tabCatalog').classList.toggle('active', S.view === 'catalog');
+  $('#tabDomain').classList.toggle('active', S.view === 'domain');
   $('#tabTools').classList.toggle('active', S.view === 'tools');
   $('#tabAdmin').classList.toggle('active', S.view === 'admin');
   $('#tabAdmin').hidden = !canAdmin;
@@ -391,6 +394,10 @@ function renderCatalog() {
   $('#grid').innerHTML = list.map((i) => `
     <div class="card ${S.sel.has(i.id) ? 'sel' : ''}" data-id="${i.id}" ${canEdit ? 'draggable="true"' : ''}>
       <div class="chk" data-chk="1">✓</div>
+      <div class="card-actions">
+        <button class="ca-btn" type="button" data-qact="copy" title="Panoya kopyala">📋</button>
+        <a class="dl-link" href="/api/images/${i.id}/download" download="${esc(i.name)}" data-qact="dl" title="İndir"><button class="ca-btn" type="button">⬇</button></a>
+      </div>
       <div class="img"><img loading="lazy" draggable="false" src="${thumbUrl(i)}" alt=""></div>
       <div class="meta"><div class="nm" title="${esc(i.name)}">${esc(i.name)}</div>
         <div class="sub"><span>${i.width}×${i.height}</span><span>${fmtBytes(i.size)}</span></div>
@@ -633,6 +640,12 @@ $('#grid').addEventListener('click', (e) => {
   const card = e.target.closest('.card');
   if (!card) return;
   const id = card.dataset.id;
+  if (e.target.closest('[data-qact="copy"]')) {
+    const img = S.imgs.find((x) => x.id === id);
+    if (img) copyImage(img);
+    return;
+  }
+  if (e.target.closest('[data-qact="dl"]')) return;
   if (e.target.closest('[data-chk]') || S.sel.size > 0 || e.ctrlKey || e.metaKey) toggleSel(id, e.shiftKey);
   else openLightbox(id);
 });
@@ -1222,12 +1235,50 @@ function renderAdmin() {
 
   const isOwner = S.me.isOwner;
   const secLogs = d.logs.filter((l) => l.severity === 'security');
+  const trashList = d.trash || [];
+  const trashTabBtn = $('#adminSubtabs button[data-atab="trash"]');
+  if (trashTabBtn) trashTabBtn.textContent = `🗑️ Çöp Kutusu (${trashList.length})`;
   $('#adminStats').innerHTML = `
     <div class="stat-card"><div class="lbl">Senin Hesabın</div><div class="val">${renderRoleBadge(S.me.role)}</div><div class="sub">@${esc(S.me.username)} · Kalıcı Oturum</div></div>
     <div class="stat-card"><div class="lbl">Çevrimiçi Kişiler</div><div class="val">${d.onlineSessions.length} aktif</div><div class="sub">${d.onlineSessions.filter((s) => s.isAnon).length} anonim · ${d.onlineSessions.filter((s) => !s.isAnon).length} giriş yapmış</div></div>
-    <div class="stat-card"><div class="lbl">Kayıtlı Profiller</div><div class="val">${d.users.length} profil</div><div class="sub">${d.users.filter((u) => u.role === 'admin' || u.role === 'owner').length} admin/kurucu · ${d.users.filter((u) => u.role === 'editor').length} editör</div></div>
+    <div class="stat-card"><div class="lbl">Profiller &amp; Çöp Kutusu</div><div class="val">${d.users.length} profil</div><div class="sub">${trashList.length} silinen görsel çöp kutusunda</div></div>
     <div class="stat-card"><div class="lbl">Güvenlik Duvarı</div><div class="val">${secLogs.length} uyarı</div><div class="sub">${d.bans.length} aktif engel · ${d.logs.length} toplam kayıt</div></div>
   `;
+
+  if (S.adminTab === 'trash') {
+    $('#adminBody').innerHTML = `
+      <div class="admin-card">
+        <h3>
+          <span>🗑️ Çöp Kutusu – Son Silinen Görseller (${trashList.length})</span>
+          <div class="row-btns">
+            ${trashList.length ? `<button class="primary mini" style="font-size:12px;padding:5px 12px" data-act="restore-all-trash">↩️ Tümünü Geri Yükle</button>
+            <button class="danger mini" style="font-size:12px;padding:5px 12px" data-act="empty-trash">🧹 Çöp Kutusunu Boşalt</button>` : ''}
+          </div>
+        </h3>
+        <p class="muted small" style="margin-top:0">Silinen görseller 30 gün boyunca burada saklanır. İstediğiniz zaman eski kategorisine geri yükleyebilir veya kalıcı olarak silebilirsiniz.</p>
+        <table class="res-table">
+          <thead><tr><th>Önizleme</th><th>Dosya Adı</th><th>Önceki Kategori</th><th>Ölçü / Boyut</th><th>Silen Kişi</th><th>Silinme Tarihi</th><th>İşlem</th></tr></thead>
+          <tbody>
+            ${trashList.map((t) => `
+              <tr>
+                <td><img src="/thumbs/${esc(t.id)}.webp" alt=""></td>
+                <td><b>${esc(t.name)}</b></td>
+                <td><span class="badge neutral">📁 ${esc(t.origCategoryName || 'Ana dizin')}</span></td>
+                <td class="muted small">${t.width}×${t.height} · ${fmtBytes(t.size)}</td>
+                <td><b>${esc(t.deletedBy || '—')}</b></td>
+                <td class="muted small">${fmtDate(t.deletedAt)}</td>
+                <td>
+                  <div class="row-btns">
+                    <button class="mini primary" style="font-size:12px;padding:3px 10px" data-act="restore-trash" data-id="${t.id}">↩️ Geri Yükle</button>
+                    <button class="mini danger" style="font-size:12px;padding:3px 10px" data-act="del-trash" data-id="${t.id}" data-name="${esc(t.name)}">🔥 Kalıcı Sil</button>
+                  </div>
+                </td>
+              </tr>`).join('') || '<tr><td colspan="7" class="muted">Çöp kutusu boş.</td></tr>'}
+          </tbody>
+        </table>
+      </div>`;
+    return;
+  }
 
   if (S.adminTab === 'users') {
     const roleSelect = (curRole, targetIsOwner, targetIsAdmin) => {
@@ -1459,7 +1510,241 @@ $('#adminBody').addEventListener('click', async (e) => {
       await loadAdminOverview();
     }
   }
+  if (a === 'restore-trash') {
+    const r = await act(() => api('/api/admin/trash/restore', { method: 'POST', body: { ids: [b.dataset.id] } }), 'Görsel kataloğa geri yüklendi');
+    if (r) { await loadState(); await loadAdminOverview(); }
+  }
+  if (a === 'restore-all-trash') {
+    const allIds = (S.adminData?.trash || []).map((t) => t.id);
+    if (!allIds.length) return;
+    const r = await act(() => api('/api/admin/trash/restore', { method: 'POST', body: { ids: allIds } }), `${allIds.length} görsel geri yüklendi`);
+    if (r) { await loadState(); await loadAdminOverview(); }
+  }
+  if (a === 'del-trash') {
+    if (!(await confirmBox({ title: 'Kalıcı olarak sil', message: `<b>${esc(b.dataset.name)}</b> kalıcı olarak silinecek ve bir daha geri alınamayacak.`, ok: 'Kalıcı Sil', danger: true }))) return;
+    if (await act(() => api('/api/admin/trash', { method: 'DELETE', body: { ids: [b.dataset.id] } }), 'Görsel kalıcı olarak silindi')) {
+      await loadAdminOverview();
+    }
+  }
+  if (a === 'empty-trash') {
+    if (!(await confirmBox({ title: 'Çöp kutusunu boşalt', message: 'Çöp kutusundaki tüm görseller kalıcı olarak silinecek. Emin misin?', ok: 'Tümünü Kalıcı Sil', danger: true }))) return;
+    if (await act(() => api('/api/admin/trash', { method: 'DELETE', body: {} }), 'Çöp kutusu boşaltıldı')) {
+      await loadAdminOverview();
+    }
+  }
 });
+
+/* ====================================================================
+   Otomatik Domain / Rakam Üretici
+   ==================================================================== */
+const DOM = { img: null, ready: false };
+
+function parseDomainNumbers(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return ['801'];
+  const out = [];
+  for (const part of s.split(/[,;\s]+/).filter(Boolean)) {
+    const m = part.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (m) {
+      const a = parseInt(m[1], 10);
+      const b = parseInt(m[2], 10);
+      const step = a <= b ? 1 : -1;
+      for (let k = a; step > 0 ? k <= b : k >= b; k += step) {
+        out.push(String(k));
+        if (out.length >= 150) break;
+      }
+    } else {
+      out.push(part.slice(0, 12));
+    }
+    if (out.length >= 150) break;
+  }
+  return out.length ? [...new Set(out)] : ['801'];
+}
+
+function initDomainTool() {
+  if (DOM.ready) { drawDomainPreview(); return; }
+  DOM.ready = true;
+  loadDomainTemplate('/domain-template.png');
+
+  ['#domInput', '#domUrlTpl', '#domBigSize', '#domUrlSize', '#domBigX', '#domBigY', '#domUrlX', '#domUrlY'].forEach((sel) => {
+    $(sel).addEventListener('input', drawDomainPreview);
+  });
+  $('#btnDomDefaultTpl').onclick = () => loadDomainTemplate('/domain-template.png');
+  $('#btnDomCustomTpl').onclick = () => $('#domTplFile').click();
+  $('#domTplFile').onchange = (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (f) loadDomainTemplate(URL.createObjectURL(f));
+  };
+  $('#btnDomSingleDl').onclick = async () => {
+    const list = parseDomainNumbers($('#domInput').value);
+    renderDomainToCanvas(list[0]);
+    const blob = await new Promise((r) => $('#domainCanvas').toBlob(r, 'image/png'));
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${list[0]}.png`;
+    a.click();
+  };
+  $('#btnDomCopy').onclick = async () => {
+    try {
+      const list = parseDomainNumbers($('#domInput').value);
+      renderDomainToCanvas(list[0]);
+      const blob = await new Promise((r) => $('#domainCanvas').toBlob(r, 'image/png'));
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      toast(`📋 ${list[0]}.png panoya kopyalandı`, 'ok');
+    } catch { toast('⚠ Panoya kopyalanamadı', 'err'); }
+  };
+  $('#btnDomBatchZip').onclick = () => runDomainBatch('download');
+  $('#btnDomSaveCat').onclick = () => runDomainBatch('catalog');
+}
+
+function loadDomainTemplate(src) {
+  const im = new Image();
+  im.crossOrigin = 'anonymous';
+  im.onload = () => {
+    DOM.img = im;
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawDomainPreview);
+    else drawDomainPreview();
+  };
+  im.src = src;
+}
+
+function renderDomainToCanvas(numStr) {
+  const cv = $('#domainCanvas');
+  const ctx = cv.getContext('2d');
+  if (DOM.img) {
+    cv.width = DOM.img.naturalWidth || 1080;
+    cv.height = DOM.img.naturalHeight || 1080;
+    ctx.drawImage(DOM.img, 0, 0);
+  } else {
+    ctx.fillStyle = '#140c08';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+  }
+
+  const bigSize = +$('#domBigSize').value || 202;
+  const urlSize = +$('#domUrlSize').value || 29;
+  const bigX = +$('#domBigX').value || 50;
+  const bigY = +$('#domBigY').value || 316;
+  const urlX = +$('#domUrlX').value || 227;
+  const urlY = +$('#domUrlY').value || 681;
+  const urlTpl = $('#domUrlTpl').value || 'www.{no}betorspin.com';
+  const urlText = urlTpl.replace(/\{no\}/gi, numStr);
+
+  // 1. Büyük Rakam
+  ctx.save();
+  ctx.font = `700 ${bigSize}px "Poppins", sans-serif`;
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetY = 4;
+  ctx.fillText(numStr, bigX, bigY);
+  ctx.restore();
+
+  // 2. Alt Buton URL
+  ctx.save();
+  ctx.font = `500 ${urlSize}px "Poppins", sans-serif`;
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(urlText, urlX, urlY);
+  ctx.restore();
+}
+
+function drawDomainPreview() {
+  const list = parseDomainNumbers($('#domInput').value);
+  const first = list[0];
+  $('#domPreviewLabel').textContent = `${first}.png`;
+  $('#domCountInfo').innerHTML = list.length === 1
+    ? `<b>1</b> adet görsel üretilecek (<b>${esc(first)}.png</b>)`
+    : `Toplam <b>${list.length}</b> adet görsel üretilecek (<b>${esc(first)}.png</b> … <b>${esc(list[list.length - 1])}.png</b>)`;
+  $('#btnDomBatchZip').textContent = list.length === 1 ? `⬇ ${first}.png İndir` : `📦 ${list.length} Görseli Üret & ZIP İndir`;
+  $('#btnDomSaveCat').textContent = list.length === 1 ? `📥 ${first}.png Kataloğa Kaydet` : `📥 ${list.length} Görseli Kataloğa Kaydet`;
+  renderDomainToCanvas(first);
+}
+
+async function runDomainBatch(mode) {
+  const list = parseDomainNumbers($('#domInput').value);
+  if (mode === 'download' && list.length === 1) {
+    $('#btnDomSingleDl').click();
+    return;
+  }
+  let targetCatId = null;
+  if (mode === 'catalog') {
+    if (!S.me.canEdit) { toast('⚠ Kataloğa kaydetmek için düzenleme yetkisi gerekir.', 'err'); return; }
+    const domCat = S.cats.find((c) => c.name.toLowerCase().includes('domain'));
+    const pick = await pickCategory({
+      title: `${list.length} Domain Görselini Kataloğa Kaydet`,
+      selected: domCat ? domCat.id : S.cur,
+      ok: 'Üret & Kaydet',
+    });
+    if (!pick) return;
+    targetCatId = pick.id;
+  }
+
+  const bar = $('#domProgress');
+  bar.hidden = false;
+  $('div', bar).style.width = '0%';
+  $('#btnDomBatchZip').disabled = true;
+  $('#btnDomSaveCat').disabled = true;
+  S.busy++;
+
+  try {
+    const blobs = [];
+    for (let i = 0; i < list.length; i++) {
+      const no = list[i];
+      renderDomainToCanvas(no);
+      const blob = await new Promise((r) => $('#domainCanvas').toBlob(r, 'image/png'));
+      blobs.push({ name: `${no}.png`, blob });
+      $('div', bar).style.width = Math.round(((i + 1) / list.length) * 50) + '%';
+    }
+
+    if (mode === 'catalog') {
+      const batchSize = 10;
+      let added = 0;
+      for (let i = 0; i < blobs.length; i += batchSize) {
+        const chunk = blobs.slice(i, i + batchSize);
+        const form = new FormData();
+        form.append('categoryId', targetCatId || '');
+        form.append('compress', 'balanced');
+        form.append('meta', JSON.stringify(chunk.map((x) => ({ name: x.name, path: x.name }))));
+        chunk.forEach((x) => form.append('files', x.blob, x.name));
+        const res = await api('/api/images', { method: 'POST', form });
+        added += res.added;
+        $('div', bar).style.width = (50 + Math.round(((i + chunk.length) / blobs.length) * 50)) + '%';
+      }
+      toast(`✅ ${added} domain görseli kataloğa kaydedildi`, 'ok');
+      await loadState();
+    } else {
+      // Sıkıştırıp ZIP olarak indir
+      const toolIds = [];
+      const batchSize = 8;
+      for (let i = 0; i < blobs.length; i += batchSize) {
+        const chunk = blobs.slice(i, i + batchSize);
+        const form = new FormData();
+        form.append('opts', JSON.stringify({ compress: true, level: 'balanced', format: 'keep', resize: { enabled: false } }));
+        form.append('names', JSON.stringify(chunk.map((x) => x.name)));
+        chunk.forEach((x) => form.append('files', x.blob, x.name));
+        const res = await api('/api/tools/process', { method: 'POST', form });
+        res.results.forEach((r) => { if (r.id) toolIds.push(r.id); });
+        $('div', bar).style.width = (50 + Math.round(((i + chunk.length) / blobs.length) * 50)) + '%';
+      }
+      if (toolIds.length) {
+        location.href = '/api/tools/zip?ids=' + toolIds.join(',');
+        toast(`📦 ${toolIds.length} domain görseli ZIP olarak indiriliyor`, 'ok');
+      }
+    }
+  } catch (e) {
+    toast('⚠ ' + esc(e.message), 'err');
+  } finally {
+    S.busy--;
+    drawDomainPreview();
+    $('#btnDomBatchZip').disabled = false;
+    $('#btnDomSaveCat').disabled = false;
+    setTimeout(() => { bar.hidden = true; }, 600);
+  }
+}
 
 /* ---------- Başlat ---------- */
 (async function init() {

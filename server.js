@@ -48,6 +48,8 @@ let db = {
   sessions: {},
   // bans: { id, type:'user'|'device', target, targetName, reason, createdBy, createdAt }
   bans: [],
+  // trash: { ...imageRecord, origCategoryName, deletedBy, deletedAt }
+  trash: [],
   // logs: { id, ts, actorId, actorName, actorAvatar, actorRole, action, detail, severity:'info'|'warn'|'security' }
   logs: [],
 };
@@ -61,6 +63,7 @@ function loadDbFromDisk() {
       db.sessions = db.sessions || {};
       // Eski IP banlarını temizle (aynı IP'den çalışıldığı için IP engeli kullanılmaz)
       db.bans = (db.bans || []).filter((b) => b.type !== 'ip');
+      db.trash = db.trash || [];
       db.logs = db.logs || [];
       delete db.ipRules;
     } catch (e) {
@@ -870,8 +873,61 @@ app.get('/api/admin/overview', requireAdmin, (req, res) => {
     users,
     onlineSessions,
     bans: db.bans,
+    trash: db.trash,
     logs: db.logs.slice(0, 500),
   });
+});
+
+// Çöp Kutusu: Görselleri geri yükleme veya kalıcı silme
+app.post('/api/admin/trash/restore', requireAdmin, (req, res) => {
+  const ids = new Set(req.body.ids || []);
+  let restored = 0;
+  const remaining = [];
+  for (const item of db.trash) {
+    if (!ids.has(item.id)) { remaining.push(item); continue; }
+    let catId = item.categoryId && catById(item.categoryId) ? item.categoryId : null;
+    if (!catId && item.origCategoryName) {
+      let found = db.categories.find((c) => c.parentId === null && c.name.toLowerCase() === item.origCategoryName.toLowerCase());
+      if (!found) {
+        found = { id: uid(), name: item.origCategoryName, parentId: null, createdAt: Date.now() };
+        db.categories.push(found);
+      }
+      catId = found.id;
+    }
+    const rec = {
+      id: item.id,
+      categoryId: catId,
+      name: uniqueImageName(catId, item.name, item.id),
+      ext: item.ext,
+      format: item.format,
+      width: item.width,
+      height: item.height,
+      size: item.size,
+      addedBy: item.addedBy || '',
+      createdAt: item.createdAt || Date.now(),
+      updatedAt: Date.now(),
+    };
+    db.images.push(rec);
+    restored++;
+  }
+  db.trash = remaining;
+  if (restored) {
+    addLog(req, 'Çöp Kutusundan Geri Yükleme', `${restored} görseli çöp kutusundan kataloğa geri yükledi`);
+    save();
+  }
+  res.json({ restored });
+});
+
+app.delete('/api/admin/trash', requireAdmin, async (req, res) => {
+  const ids = req.body?.ids ? new Set(req.body.ids) : null;
+  const doomed = ids ? db.trash.filter((i) => ids.has(i.id)) : [...db.trash];
+  await Promise.all(doomed.map(deleteImageFiles));
+  db.trash = ids ? db.trash.filter((i) => !ids.has(i.id)) : [];
+  if (doomed.length) {
+    addLog(req, 'Çöp Kutusu Temizleme', `Çöp kutusundaki ${doomed.length} görseli kalıcı olarak sildi`);
+    save(false);
+  }
+  res.json({ deleted: doomed.length });
 });
 
 // Admin veya Kurucu tarafından yeni profil oluşturma (kullanıcı adı + şifre ile)
@@ -1063,6 +1119,19 @@ app.patch('/api/categories/:id', requireEdit, (req, res) => {
   res.json(cat);
 });
 
+function moveToTrash(imgs, actorName) {
+  const now = Date.now();
+  for (const img of imgs) {
+    const cat = img.categoryId ? catById(img.categoryId) : null;
+    db.trash.unshift({
+      ...img,
+      origCategoryName: cat ? cat.name : '',
+      deletedBy: actorName || 'Yetkili',
+      deletedAt: now,
+    });
+  }
+}
+
 app.delete('/api/categories/:id', requireEdit, async (req, res) => {
   const cat = catById(req.params.id);
   if (!cat) return res.status(404).json({ error: 'Kategori bulunamadı' });
@@ -1074,10 +1143,10 @@ app.delete('/api/categories/:id', requireEdit, async (req, res) => {
   } else {
     const ids = descendantIds(cat.id);
     const doomed = db.images.filter((i) => ids.has(i.categoryId));
-    await Promise.all(doomed.map(deleteImageFiles));
+    moveToTrash(doomed, req.auth.name);
     db.images = db.images.filter((i) => !ids.has(i.categoryId));
     db.categories = db.categories.filter((c) => !ids.has(c.id));
-    addLog(req, 'Kategori Silme', `“${cat.name}” kategorisini ve içindeki ${doomed.length} görseli sildi`);
+    addLog(req, 'Kategori Silme', `“${cat.name}” kategorisini sildi (${doomed.length} görsel çöp kutusuna taşındı)`);
   }
   save();
   res.json({ ok: true });
@@ -1171,11 +1240,11 @@ app.post('/api/images/move', requireEdit, (req, res) => {
 app.delete('/api/images', requireEdit, async (req, res) => {
   const ids = new Set(req.body.ids || []);
   const doomed = db.images.filter((i) => ids.has(i.id));
-  await Promise.all(doomed.map(deleteImageFiles));
+  moveToTrash(doomed, req.auth.name);
   db.images = db.images.filter((i) => !ids.has(i.id));
   if (doomed.length) {
     const sample = doomed.slice(0, 3).map((x) => x.name).join(', ') + (doomed.length > 3 ? '…' : '');
-    addLog(req, 'Görsel Silme', `${doomed.length} görseli sildi (${sample})`);
+    addLog(req, 'Görsel Silme (Çöp Kutusu)', `${doomed.length} görseli çöp kutusuna taşıdı (${sample})`);
   }
   save();
   res.json({ deleted: doomed.length });
@@ -1346,6 +1415,13 @@ setInterval(() => {
   const sessLimit = Date.now() - 30 * 24 * 3600 * 1000;
   for (const [sid, s] of Object.entries(db.sessions)) {
     if ((s.lastSeen || 0) < sessLimit) delete db.sessions[sid];
+  }
+  // 30 günden eski çöp kutusu öğelerini otomatik temizle
+  const oldTrash = (db.trash || []).filter((t) => (t.deletedAt || 0) < sessLimit);
+  if (oldTrash.length) {
+    oldTrash.forEach((t) => deleteImageFiles(t));
+    db.trash = db.trash.filter((t) => (t.deletedAt || 0) >= sessLimit);
+    save(false);
   }
 }, 15 * 60 * 1000).unref();
 
